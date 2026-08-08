@@ -5,6 +5,13 @@ Agent-facing contract for this repo. Read this before touching anything.
 `notebooklm-sync` is a CLI that keeps a NotebookLM notebook in sync with a declared set of
 web sources, by driving the **already-installed `notebooklm` CLI** as a subprocess.
 
+> **This file is the master document.** Everything an agent needs to work here — commands,
+> architecture, invariants, upstream quirks, auth, testing, memory — lives in this file and
+> nowhere else. `CLAUDE.md` contains only a pointer to it and must never accumulate content of
+> its own. When you learn something durable about how this repo works, add it **here** (and to
+> engram); do not start a parallel doc, and do not copy a section of this file into another one.
+> Two copies of a rule means one of them is already wrong.
+
 ---
 
 ## Memory (engram) — required
@@ -47,6 +54,8 @@ Scope every entry to this project only.
 
 ## Docs layout
 
+- **`AGENTS.md`** (this file) — the master agent doc. See the note at the top.
+- **`CLAUDE.md`** — a reference to this file. Nothing else goes in it.
 - **`docs/plans/`** — implementation plans, **tracked in git**. Date-prefixed, e.g.
   `2026-08-08-notebooklm-sync-scaffolding.md`. Treat a plan as a living document: when work
   lands, update the plan's status and its Pending section rather than leaving it frozen at
@@ -54,7 +63,7 @@ Scope every entry to this project only.
 - **`docs/sessions/`** — session notes and scratch write-ups. **Gitignored** via
   `/home/nestor/.gitignore_global`, so it is safe for working notes but never a place to put
   something that must survive for other people. Anything durable belongs in `docs/plans/`,
-  `AGENTS.md`, a skill, or engram.
+  this file, a skill, or engram.
 
 ## Naming
 
@@ -68,18 +77,95 @@ name of this directory. They are unrelated.
 
 ---
 
-## Architecture rules
+## Commands
 
-**All `notebooklm` invocations go through `src/notebooklm_sync/nlm.py`.** No `subprocess`
-import anywhere else in `src/`. That boundary is what keeps the rest of the codebase pure and
-testable offline — breaking it breaks the entire test strategy.
+```bash
+uv sync                                  # install (incl. dev group)
+uv run pytest                            # full suite — offline, no auth, no network
+uv run pytest tests/test_engine.py       # one file
+uv run pytest -k wait_exit_two           # one test by name
+uv run ruff check .                      # lint (line-length 100) — currently clean
+uv run notebooklm-sync --help
+uv run notebooklm-sync sync research --dry-run        # plan only, no side effects
+```
 
-**The engine is split into plan then execute.** `--dry-run` runs the identical planning code
-and stops before side effects. Never add a second, dry-run-only code path — it will drift from
-the real one and lie to you.
+There is no CI. The suite is fully offline, so anything failing locally is a real failure.
+
+`ruff check` passes; the code is **not** `ruff format`-clean and isn't meant to be — don't run
+`ruff format` over the repo, it would reflow ~11 files into an unrelated diff.
+
+---
+
+## Architecture
+
+One CLI that reconciles a **declared** YAML source manifest against what a NotebookLM notebook
+**actually has**. Every run is recorded in SQLite so drift and history are inspectable.
+
+The data flow through `src/notebooklm_sync/`, in order:
+
+```
+config.py     .env  →  Settings{notebooks, policy, timeouts, db_path}
+manifest.py   YAML  →  list[ManifestEntry]          (validates + dedupes)
+nlm.py        notebooklm source list --json  →  list[RemoteSource]
+engine.plan()  (entries, remote, policy) →  SyncPlan[PlannedAction]     ← PURE
+engine.execute()  PlannedAction  →  Outcome, via nlm.py                 ← side effects
+db.py         plan/outcomes  →  sync_runs + sync_events + sources mirror
+cli.py        Typer commands: sync · status · notebooks · history · init
+```
+
+### The three invariants
+
+These carry the whole design. Each has a reason that is not obvious from the code, and breaking
+any one of them breaks something far away from where you edited.
+
+**All `notebooklm` invocations go through `nlm.py`.** No `subprocess` import anywhere else in
+`src/`. That single seam is what lets `tests/fake_notebooklm.py` impersonate the upstream binary
+on `PATH` and keep the entire suite offline. Breaking the boundary breaks the test strategy, not
+just one test.
+
+**`engine.plan()` is pure; `engine.execute()` mutates.** `--dry-run` and `status` run the
+*identical* `plan()` and stop before side effects. Never add a second, dry-run-only code path —
+it will drift from the real one and then lie to you about what a real run would do.
 
 **Sync never deletes.** Sources in the notebook that are absent from the manifest ("orphans")
-are reported, never removed. A typo in a manifest must not be able to destroy a notebook.
+are reported, never removed — a typo in a manifest must not be able to destroy a notebook. This
+holds in `db.py` too: `sources` is a mirror of believed notebook state, and `sync_runs` /
+`sync_events` are append-only history. Schema is `SCHEMA_VERSION` / `PRAGMA user_version`,
+applied idempotently in `init_db()`; future migrations branch on `current` before stamping.
+
+### Things that will bite you
+
+**The upstream wire shape is not the upstream Python model.** `source list --json` sends `type`
+(not `kind`) and lowercase `status` (`"ready"`, not `"READY"`), plus extra fields.
+`source_from_payload()` in `nlm.py` is the bridge — `payload.get("kind") or payload.get("type")`.
+`tests/test_live_shape.py` pins this against a real captured payload
+(`tests/fixtures/source_list.json`); if you change source parsing, that file is the guard that
+catches it.
+
+**Normalized URLs are for comparison only.** `matching.normalize_url()` strips `www.`, tracking
+params, trailing slashes and default ports, and collapses every YouTube shape onto
+`https://youtube.com/watch?v=<id>`. `notebooklm source add` always receives the user's
+**original** URL. The normalized form only ever lives in `normalized_url` fields and the DB
+mirror. `normalize_url()` also raises `ManifestError` on non-http(s), which is why manifest
+validation gets URL checking for free via `dedupe_entries()`.
+
+**`override` degrades, it doesn't fail.** Only kinds in `models.REFRESHABLE_KINDS` can be
+refreshed; anything else (pasted text, uploads) becomes a `SKIP` with a reason, so one odd source
+can't block the notebook. Refresh is deliberately in-place rather than delete-and-re-add — the
+source keeps its ID, so citations in saved notes and chats keep resolving.
+
+**Errors are typed and map to exit codes** (`errors.py`): `1` action failed · `2` config/manifest
+(`ConfigError`, `ManifestError`) · `3` auth (`AuthError`). `cli.py` catches `SyncError` at each
+command boundary and exits with `exc.exit_code` — new failure modes should get a `SyncError`
+subclass, not an ad-hoc `typer.Exit`.
+
+### Configuration shape
+
+`.env` declares `NOTEBOOKS=research,marketing`, then per name `NOTEBOOK_<UPPER_NAME>_ID`,
+`_SOURCES` (manifest path) and optional `_POLICY`. `config._env_key()` does the name→key
+mangling. Precedence is `os.environ` > `.env` > defaults (`load_dotenv(override=False)`), so CI
+can override anything without editing files. Policy resolution, first match wins: manifest entry
+`policy:` → `NOTEBOOK_<NAME>_POLICY` → `SYNC_POLICY` → `skip`.
 
 ---
 
@@ -90,8 +176,10 @@ rediscover them.
 
 1. **`source stale` inverts its exit code** under `--exit-on-stale` (0 = stale, 1 = fresh).
    Never branch on its exit code — branch on the JSON `stale` field.
-2. **`source wait` uses exit 2 for timeout**, distinct from 1 = failure. A timeout is
-   retryable and means `PENDING`; a failure is not.
+2. **`source wait` uses exit 2 for timeout**, distinct from 1 = failure. A timeout means the
+   source is still ingesting: it maps to `Outcome.PENDING`, the next run reconciles it, and the
+   run's exit code stays 0. A failure is none of those. Collapsing 2 into 1 turns a slow ingest
+   into a spurious hard failure.
 3. **`auth check` validates locally only** and will happily report `{"status": "ok"}` while
    live API calls fail with expired auth. Any real preflight must pass `--test` to force a
    network round-trip.
@@ -116,17 +204,23 @@ NotebookLM has **no public API and no API key**. The upstream CLI authenticates 
 ## Testing
 
 **Tests never hit the network and never need auth.** A test that requires live credentials is
-a broken test. `tests/fake_notebooklm.py` is a shim placed on `PATH` that replays canned JSON
-keyed by argv. See the `test-fixtures` skill.
+a broken test — the cookies expire, so a suite depending on them fails randomly on someone
+else's machine.
 
-```bash
-uv sync           # install
-uv run pytest     # full suite, offline
-uv run notebooklm-sync --help
-```
+`tests/conftest.py` provides the fixtures:
+
+- `fake_cli` — writes an executable `notebooklm` shim into a tmp dir and prepends it to `PATH`,
+  so `nlm.py`'s subprocess resolves to `tests/fake_notebooklm.py`. It records every argv and
+  replays canned JSON keyed by subcommand (`"source list"`, `"auth check"`). Scenario values are
+  either a bare response object or `{"stdout": ..., "exit": N}` when the exit code matters.
+- `clean_env` — strips inherited `NOTEBOOK*` / `SYNC_*` so a test sees only what it sets.
+- `db_path` — a tmp database, never the repo's `./notebooklm-sync.db`.
+
+See the `test-fixtures` skill for the scenario recipes that reproduce each sharp edge above.
 
 Live verification against the real API is a **manual** step, gated on the user having run
-`notebooklm login`. Never assume it works — check, and report honestly if auth is expired.
+`notebooklm login`. Never assume it works — check with `notebooklm auth check --test`, and report
+honestly if auth is expired.
 
 ---
 
