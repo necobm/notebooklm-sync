@@ -64,9 +64,23 @@ From `notebooklm/_types/sources.py`. `source list --json` rows carry:
 | `id` | Source ID, used by refresh/delete/wait |
 | `title` | May be null |
 | `url` | **Our matching key.** Null for pasted text and uploaded files |
-| `kind` | `SourceType` — see below |
-| `status` | `READY` / `PROCESSING` / `ERROR` |
-| `created_at` | Timestamp, may be null |
+| `type` | The source kind — **on the wire the field is `type`, not `kind`** |
+| `status` | Lowercase on the wire: `ready` / `processing` / `error` |
+| `created_at` | ISO timestamp, may be null |
+
+**Verified live wire shape** (v0.7.3) — the Python enum names are uppercase but
+the JSON is not, and the rows are nested with notebook metadata:
+
+```json
+{"notebook_id": "...", "notebook_title": "...", "count": 2,
+ "sources": [{"index": 1, "id": "6240829a-...", "title": "Example Domain",
+              "type": "web_page", "url": "https://example.com/",
+              "status": "ready", "status_id": 2,
+              "created_at": "2026-08-08T16:24:24"}]}
+```
+
+`source_from_payload` in `nlm.py` reads `kind or type` for this reason. A captured
+copy lives at `tests/fixtures/source_list.json`, guarded by `tests/test_live_shape.py`.
 
 `SourceType` values: `web_page`, `youtube`, `google_docs`, `google_slides`,
 `google_spreadsheet`, `google_drive_audio`, `google_drive_video`, `pdf`, `pasted_text`,

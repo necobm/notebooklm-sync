@@ -1,0 +1,27 @@
+{
+  "notebook_id": "3fb8dfb7-f168-4b35-a662-dcfdec05433d",
+  "notebook_title": "notebooklm-sync smoke test (safe to delete)",
+  "sources": [
+    {
+      "index": 1,
+      "id": "6240829a-e30d-49d2-bd47-2d89879336de",
+      "title": "Example Domain",
+      "type": "web_page",
+      "url": "https://example.com/",
+      "status": "ready",
+      "status_id": 2,
+      "created_at": "2026-08-08T16:24:24"
+    },
+    {
+      "index": 2,
+      "id": "ef19946e-2984-42a7-922f-fb45ff33f581",
+      "title": "RFC 9110: HTTP Semantics",
+      "type": "web_page",
+      "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "status": "ready",
+      "status_id": 2,
+      "created_at": "2026-08-08T16:24:27"
+    }
+  ],
+  "count": 2
+}
