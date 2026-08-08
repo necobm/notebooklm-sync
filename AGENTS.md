@@ -45,6 +45,17 @@ Scope every entry to this project only.
 
 ---
 
+## Docs layout
+
+- **`docs/plans/`** — implementation plans, **tracked in git**. Date-prefixed, e.g.
+  `2026-08-08-notebooklm-sync-scaffolding.md`. Treat a plan as a living document: when work
+  lands, update the plan's status and its Pending section rather than leaving it frozen at
+  the moment it was approved.
+- **`docs/sessions/`** — session notes and scratch write-ups. **Gitignored** via
+  `/home/nestor/.gitignore_global`, so it is safe for working notes but never a place to put
+  something that must survive for other people. Anything durable belongs in `docs/plans/`,
+  `AGENTS.md`, a skill, or engram.
+
 ## Naming
 
 The upstream dependency is published as **`notebooklm-py`** — which is unfortunately also the
