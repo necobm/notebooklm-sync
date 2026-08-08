@@ -1,0 +1,22 @@
+# Example source manifest. Point a notebook at it from .env:
+#   NOTEBOOK_RESEARCH_SOURCES=./sources/example.yaml
+#
+# Every entry needs a `url`. Everything else is optional.
+
+sources:
+  # Minimal entry — type is auto-detected from the URL.
+  - url: https://example.com/some-article
+
+  # Custom title, sent to `notebooklm source add --title`.
+  - url: https://example.com/whitepaper
+    title: Example Whitepaper
+
+  # Per-source policy override, wins over SYNC_POLICY / the notebook policy.
+  - url: https://blog.example.com/changelog
+    title: Changelog
+    policy: override
+
+  # YouTube URLs are normalized to youtube.com/watch?v=<id> before matching,
+  # so short links and links with timestamps still match an existing source.
+  - url: https://youtu.be/dQw4w9WgXcQ?t=42
+    type: youtube

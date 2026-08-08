@@ -1,0 +1,25 @@
+# Secrets — .env holds notebook IDs and profile config, never commit it
+.env
+.env.*
+!.env.example
+
+# Local sync database
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# engram local sync artifacts
+.engram/
