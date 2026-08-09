@@ -52,17 +52,26 @@ Scope every entry to this project only.
 
 ---
 
-## Docs layout
+## Docs layout — spec driven development
+
+This project works spec-first: spec, then plan, then tasks, then code.
 
 - **`AGENTS.md`** (this file) — the master agent doc. See the note at the top.
 - **`CLAUDE.md`** — a reference to this file. Nothing else goes in it.
-- **`docs/plans/`** — implementation plans, **tracked in git**. Date-prefixed, e.g.
-  `2026-08-08-notebooklm-sync-scaffolding.md`. Treat a plan as a living document: when work
-  lands, update the plan's status and its Pending section rather than leaving it frozen at
-  the moment it was approved.
+- **`docs/spec/`** — **the source of truth for what we build and why**, tracked in git.
+  - `constitution/` — the stable rules: `mission.md` (what we build and for whom),
+    `tech-stack.md` (technologies, domain mechanics, conventions, hard limits) and `roadmap.md`
+    (feature order and status). **Read these before planning anything.**
+  - `features/NNN-feature-name/` — one folder per feature: `spec.md` (behaviour + acceptance
+    criteria), `plan.md` (technical approach) and `tasks.md` (checklist). Write them before
+    touching code, and treat them as living documents — when work lands, update status and
+    checkboxes rather than leaving them frozen at the moment they were approved. Finish by
+    moving the feature to "Done" in `roadmap.md`.
+  - **The constitution outranks a feature plan.** If a feature conflicts with `mission.md` or
+    `tech-stack.md`, rework the feature, not the constitution.
 - **`docs/sessions/`** — session notes and scratch write-ups. **Gitignored** via
   `/home/nestor/.gitignore_global`, so it is safe for working notes but never a place to put
-  something that must survive for other people. Anything durable belongs in `docs/plans/`,
+  something that must survive for other people. Anything durable belongs in `docs/spec/`,
   this file, a skill, or engram.
 
 ## Naming

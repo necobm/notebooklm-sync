@@ -72,4 +72,5 @@ orphans and left untouched.
 uv run pytest      # offline; needs no network and no Google auth
 ```
 
-See `AGENTS.md` for the project contract.
+See `AGENTS.md` for the project contract, and `docs/spec/` for the specs — the project's
+constitution and one folder per feature.
