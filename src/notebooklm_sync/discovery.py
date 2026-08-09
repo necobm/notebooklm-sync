@@ -13,6 +13,7 @@ HTML crawl exists only for sites that publish no sitemap at all.
 from __future__ import annotations
 
 import gzip
+import logging
 import sqlite3
 import time
 import urllib.error
@@ -31,6 +32,8 @@ from .crawl import CrawlRule, filter_urls, in_scope, rule_key
 from .errors import DiscoveryError, ManifestError
 from .matching import dedupe_entries, normalize_url
 from .models import ManifestEntry
+
+log = logging.getLogger(__name__)
 
 USER_AGENT = "notebooklm-sync (+https://github.com/nestor/notebooklm-sync)"
 
@@ -217,7 +220,10 @@ class Discoverer:
         self.requests.append(url)
         if self.on_fetch:
             self.on_fetch(url)
-        return self._fetch(url)
+        response = self._fetch(url)
+        # DEBUG: one crawl rule can be 100 of these, which would drown a default log.
+        log.debug("GET %s -> %s (%d bytes)", url, response.status, len(response.body))
+        return response
 
     def discover(self, rule: CrawlRule) -> tuple[list[str], str]:
         """Return ``(candidate_urls, source)`` for ``rule``.
@@ -329,7 +335,9 @@ def resolve_rule(
     if cached is not None:
         candidates, source, fetched_at = cached
         from_cache = True
+        log.debug("cache hit %s (%d candidates)", key, len(candidates))
     else:
+        log.debug("cache miss %s", key)
         candidates, source = discoverer.discover(rule)
         fetched_at = datetime.now(UTC)
         from_cache = False
@@ -337,6 +345,14 @@ def resolve_rule(
             db.put_discovery(conn, key, rule.raw, candidates, source, fetched_at)
 
     urls, dropped = filter_urls(rule, candidates, exclude_normalized=exclude_normalized)
+    log.info(
+        "%s -> %d url(s) from %s%s%s",
+        rule.raw,
+        len(urls),
+        source,
+        " (cached)" if from_cache else "",
+        f", {dropped} dropped" if dropped else "",
+    )
     if not urls:
         raise DiscoveryError(
             f"{rule.raw} matched no pages. Check the URL, loosen [level=]/[except=], "

@@ -12,6 +12,10 @@ sources/*
 *.db-wal
 *.db-shm
 
+# Command logs — var/log/YYYY-MM-DD-<command>.log. Local runtime state, and they
+# quote notebook IDs and URLs from a personal manifest.
+var/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,7 +16,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import db as store
-from . import engine
+from . import engine, logs
 from . import progress as progress_ui
 from .config import Settings, load_settings
 from .discovery import Discoverer, Expansion, expand_entries
@@ -30,6 +33,51 @@ app = typer.Typer(
 )
 console = Console()
 err_console = Console(stderr=True)
+
+log = logging.getLogger(__name__)
+
+
+def _invocation(command: str, ctx: typer.Context | None) -> str:
+    """``sync dry_run notebook=research`` — what this run was actually asked to do.
+
+    Read from the Typer context rather than ``sys.argv``, which is only the real
+    command line when the app owns the process: under ``CliRunner`` it is pytest's.
+    Resolved parameters are also the more useful record, since they include a value
+    that came from ``.env`` and never appeared on the command line at all.
+    """
+    if ctx is None:  # pragma: no cover - only when a command is called directly
+        return command
+    parts = [command]
+    for name, value in sorted(ctx.params.items()):
+        if value is None or value is False:
+            continue
+        parts.append(name if value is True else f"{name}={value}")
+    return " ".join(parts)
+
+
+@contextlib.contextmanager
+def _logged(command: str, settings: Settings, ctx: typer.Context | None = None) -> Iterator[None]:
+    """Open this invocation's log file and bracket the command body.
+
+    Every command ends by raising ``typer.Exit`` or by falling off the end, and both
+    are recorded — an exit code with no matching line would make the file lie by
+    omission. Nothing is swallowed: each branch re-raises.
+    """
+    with logs.session(command, settings=settings):
+        log.info("start: %s", _invocation(command, ctx))
+        try:
+            yield
+        except typer.Exit as exc:
+            log.info("done: exit=%d", exc.exit_code)
+            raise
+        except SyncError as exc:
+            log.error("failed: %s (exit=%d)", exc, exc.exit_code)
+            raise
+        except BaseException:
+            log.exception("crashed")
+            raise
+        else:
+            log.info("done: exit=0")
 
 
 def _load() -> Settings:
@@ -193,7 +241,14 @@ SYNC_POLICY=skip
 SYNC_DB_PATH=./notebooklm-sync.db
 SYNC_WAIT_TIMEOUT=120
 SYNC_CLI_TIMEOUT=300
+
+# Command logs: one file per command per day, at
+# <SYNC_LOG_DIR>/<YYYY-MM-DD>-<command>.log. Set SYNC_LOG=0 to turn them off.
+# INFO records commands, upstream calls and actions; DEBUG adds every HTTP fetch.
+SYNC_LOG=1
+SYNC_LOG_DIR=./var/log
 SYNC_LOG_LEVEL=INFO
+SYNC_LOG_RETENTION_DAYS=30
 
 # Live progress display on stderr for `sync`, `status` and `expand`. It already
 # turns itself off when stderr is not a terminal and whenever -v is used; set this
@@ -229,6 +284,7 @@ def _fail(exc: SyncError) -> None:
 
 @app.command()
 def sync(
+    ctx: typer.Context,
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     policy: str = typer.Option(None, "--policy", "-p", help="Override the sync policy."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Plan only; change nothing."),
@@ -249,93 +305,120 @@ def sync(
     """Sync a notebook against its source manifest."""
     try:
         settings = _load()
-        config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
-        default_policy = SyncPolicy(policy) if policy else settings.policy_for(config)
+        with _logged("sync", settings, ctx):
+            config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
+            default_policy = SyncPolicy(policy) if policy else settings.policy_for(config)
 
-        entries = load_manifest(config.manifest_path)
-        conn = store.connect(settings.db_path)
-        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
+            entries = load_manifest(config.manifest_path)
+            conn = store.connect(settings.db_path)
+            reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
 
-        # Everything slow happens inside this block, and nothing is printed from it.
-        # Rich restores the terminal on the way out whatever raised, so Ctrl-C, a
-        # SyncError and a typer.Exit all leave a usable cursor behind.
-        with reporter:
-            # Crawl rules resolve here, before plan() — which keeps plan() pure and
-            # keeps --dry-run running the identical code path a real sync does.
-            entries, expansions = _expand(
-                entries, settings, conn, refresh=refresh_discovery,
-                verbose=verbose, reporter=reporter,
+            # Everything slow happens inside this block, and nothing is printed from it.
+            # Rich restores the terminal on the way out whatever raised, so Ctrl-C, a
+            # SyncError and a typer.Exit all leave a usable cursor behind.
+            with reporter:
+                # Crawl rules resolve here, before plan() — which keeps plan() pure and
+                # keeps --dry-run running the identical code path a real sync does.
+                entries, expansions = _expand(
+                    entries, settings, conn, refresh=refresh_discovery,
+                    verbose=verbose, reporter=reporter,
+                )
+                client = _client(settings, verbose=verbose)
+
+                if not dry_run:
+                    # --test forces a real network round-trip; the local-only check
+                    # reports "ok" even when the session has expired.
+                    reporter.phase("auth")
+                    client.auth_check(test=True)
+                    reporter.finish("credentials ok")
+
+                reporter.phase("sources")
+                remote = client.list_sources(config.notebook_id)
+                reporter.finish(f"{len(remote)} in notebook")
+
+                plan_ = engine.plan(config, entries, remote, default_policy=default_policy)
+
+                if only_stale:
+                    # Read-only, so it runs in dry-run too: the preview must show the
+                    # same refresh/skip set a real run would produce.
+                    _apply_stale_filter(plan_, client, reporter)
+
+                notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
+                run_id = store.start_run(conn, notebook_pk, default_policy.value, dry_run=dry_run)
+                # plan() is pure and logs nothing; the summary is recorded here instead,
+                # with the run id, so a log line joins to its sync_runs row.
+                _log_plan(plan_, run_id=run_id, policy=default_policy, dry_run=dry_run)
+
+                if not dry_run:
+                    reporter.phase("syncing")
+                    reporter.start_actions(len(plan_.actions))
+                    on_step, on_action = _execute_callbacks(reporter)
+                    engine.execute(
+                        plan_,
+                        client,
+                        wait=not no_wait,
+                        wait_timeout=settings.wait_timeout,
+                        on_step=on_step,
+                        on_action=on_action,
+                    )
+                    reporter.finish(f"{len(plan_.actions)} action(s)")
+
+            # -- the live region is gone; from here on it is only local work and output --
+
+            for action in plan_.actions:
+                store.record_event(conn, run_id, action)
+                if not dry_run and action.source_id and action.action is not Action.ORPHAN:
+                    store.upsert_source(
+                        conn,
+                        notebook_pk,
+                        source_id=action.source_id,
+                        url=action.url,
+                        normalized_url=_safe_normalize(action.url),
+                        title=action.title,
+                        kind=action.kind,
+                        status=action.outcome.value if action.outcome else None,
+                        last_action=action.action.value,
+                    )
+
+            summary = store.summarize(plan_.actions)
+            log.info(
+                "results: added=%d refreshed=%d skipped=%d pending=%d failed=%d orphans=%d",
+                summary.added,
+                summary.refreshed,
+                summary.skipped,
+                summary.pending,
+                summary.failed,
+                summary.orphans,
             )
-            client = _client(settings, verbose=verbose)
 
-            if not dry_run:
-                # --test forces a real network round-trip; the local-only check
-                # reports "ok" even when the session has expired.
-                reporter.phase("auth")
-                client.auth_check(test=True)
-                reporter.finish("credentials ok")
+            if dry_run:
+                store.finish_run(conn, run_id, summary, "dry-run")
+                _render_plan(plan_, dry_run=True, expansions=expansions)
+                raise typer.Exit(EXIT_OK)
 
-            reporter.phase("sources")
-            remote = client.list_sources(config.notebook_id)
-            reporter.finish(f"{len(remote)} in notebook")
+            failed = summary.failed > 0
+            store.finish_run(conn, run_id, summary, "failed" if failed else "ok")
+            store.mark_notebook_synced(conn, notebook_pk)
 
-            plan_ = engine.plan(config, entries, remote, default_policy=default_policy)
-
-            if only_stale:
-                # Read-only, so it runs in dry-run too: the preview must show the
-                # same refresh/skip set a real run would produce.
-                _apply_stale_filter(plan_, client, reporter)
-
-            notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
-            run_id = store.start_run(conn, notebook_pk, default_policy.value, dry_run=dry_run)
-
-            if not dry_run:
-                reporter.phase("syncing")
-                reporter.start_actions(len(plan_.actions))
-                on_step, on_action = _execute_callbacks(reporter)
-                engine.execute(
-                    plan_,
-                    client,
-                    wait=not no_wait,
-                    wait_timeout=settings.wait_timeout,
-                    on_step=on_step,
-                    on_action=on_action,
-                )
-                reporter.finish(f"{len(plan_.actions)} action(s)")
-
-        # -- the live region is gone; from here on it is only local work and output --
-
-        for action in plan_.actions:
-            store.record_event(conn, run_id, action)
-            if not dry_run and action.source_id and action.action is not Action.ORPHAN:
-                store.upsert_source(
-                    conn,
-                    notebook_pk,
-                    source_id=action.source_id,
-                    url=action.url,
-                    normalized_url=_safe_normalize(action.url),
-                    title=action.title,
-                    kind=action.kind,
-                    status=action.outcome.value if action.outcome else None,
-                    last_action=action.action.value,
-                )
-
-        summary = store.summarize(plan_.actions)
-
-        if dry_run:
-            store.finish_run(conn, run_id, summary, "dry-run")
-            _render_plan(plan_, dry_run=True, expansions=expansions)
-            raise typer.Exit(EXIT_OK)
-
-        failed = summary.failed > 0
-        store.finish_run(conn, run_id, summary, "failed" if failed else "ok")
-        store.mark_notebook_synced(conn, notebook_pk)
-
-        _render_plan(plan_, dry_run=False, expansions=expansions)
-        raise typer.Exit(EXIT_ACTION_FAILED if failed else EXIT_OK)
+            _render_plan(plan_, dry_run=False, expansions=expansions)
+            raise typer.Exit(EXIT_ACTION_FAILED if failed else EXIT_OK)
 
     except SyncError as exc:
         _fail(exc)
+
+
+def _log_plan(plan_, *, run_id: int, policy: SyncPolicy, dry_run: bool) -> None:
+    counts = store.summarize(plan_.actions)
+    log.info(
+        "plan: run=%d policy=%s%s add=%d refresh=%d skip=%d orphan=%d",
+        run_id,
+        policy.value,
+        " dry-run" if dry_run else "",
+        counts.added,
+        counts.refreshed,
+        counts.skipped,
+        counts.orphans,
+    )
 
 
 def _apply_stale_filter(plan_, client: NlmClient, reporter: progress_ui.Reporter) -> None:
@@ -361,6 +444,7 @@ def _apply_stale_filter(plan_, client: NlmClient, reporter: progress_ui.Reporter
 
 @app.command()
 def status(
+    ctx: typer.Context,
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     refresh_discovery: bool = typer.Option(
         False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
@@ -375,31 +459,33 @@ def status(
     """Show drift between the manifest and the notebook. Changes nothing."""
     try:
         settings = _load()
-        config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
-        entries = load_manifest(config.manifest_path)
-        conn = store.connect(settings.db_path)
-        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
+        with _logged("status", settings, ctx):
+            config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
+            entries = load_manifest(config.manifest_path)
+            conn = store.connect(settings.db_path)
+            reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
 
-        with reporter:
-            entries, expansions = _expand(
-                entries, settings, conn, refresh=refresh_discovery,
-                verbose=verbose, reporter=reporter,
-            )
-            client = _client(settings, verbose=verbose)
-            reporter.phase("sources")
-            remote = client.list_sources(config.notebook_id)
-            reporter.finish(f"{len(remote)} in notebook")
-            plan_ = engine.plan(
-                config, entries, remote, default_policy=settings.policy_for(config)
-            )
+            with reporter:
+                entries, expansions = _expand(
+                    entries, settings, conn, refresh=refresh_discovery,
+                    verbose=verbose, reporter=reporter,
+                )
+                client = _client(settings, verbose=verbose)
+                reporter.phase("sources")
+                remote = client.list_sources(config.notebook_id)
+                reporter.finish(f"{len(remote)} in notebook")
+                plan_ = engine.plan(
+                    config, entries, remote, default_policy=settings.policy_for(config)
+                )
 
-        _render_plan(plan_, dry_run=True, expansions=expansions)
+            _render_plan(plan_, dry_run=True, expansions=expansions)
     except SyncError as exc:
         _fail(exc)
 
 
 @app.command()
 def expand(
+    ctx: typer.Context,
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     refresh_discovery: bool = typer.Option(
         False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
@@ -419,32 +505,33 @@ def expand(
     """
     try:
         settings = _load()
-        config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
-        entries = load_manifest(config.manifest_path)
-        conn = store.connect(settings.db_path)
-        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
+        with _logged("expand", settings, ctx):
+            config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
+            entries = load_manifest(config.manifest_path)
+            conn = store.connect(settings.db_path)
+            reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
 
-        with reporter:
-            entries, expansions = _expand(
-                entries, settings, conn, refresh=refresh_discovery,
-                verbose=verbose, reporter=reporter,
-            )
+            with reporter:
+                entries, expansions = _expand(
+                    entries, settings, conn, refresh=refresh_discovery,
+                    verbose=verbose, reporter=reporter,
+                )
 
-        if not expansions:
-            console.print(
-                f"[dim]{config.manifest_path} declares no crawl rules "
-                f"({len(entries)} plain source(s)).[/dim]"
-            )
-            return
+            if not expansions:
+                console.print(
+                    f"[dim]{config.manifest_path} declares no crawl rules "
+                    f"({len(entries)} plain source(s)).[/dim]"
+                )
+                return
 
-        for expansion in expansions:
-            table = Table(title=escape(expansion.rule.raw))
-            table.add_column("#", justify="right", style="dim")
-            table.add_column("URL")
-            for index, url in enumerate(expansion.urls, start=1):
-                table.add_row(str(index), url)
-            console.print(table)
-        _render_expansions(expansions)
+            for expansion in expansions:
+                table = Table(title=escape(expansion.rule.raw))
+                table.add_column("#", justify="right", style="dim")
+                table.add_column("URL")
+                for index, url in enumerate(expansion.urls, start=1):
+                    table.add_row(str(index), url)
+                console.print(table)
+            _render_expansions(expansions)
     except SyncError as exc:
         _fail(exc)
 
@@ -469,6 +556,7 @@ def _remote_notebook_ids(settings: Settings, *, verbose: bool) -> set[str] | Non
 
 @app.command()
 def notebooks(
+    ctx: typer.Context,
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
     ),
@@ -476,102 +564,111 @@ def notebooks(
     """List configured notebooks, check them against NotebookLM, and show last sync."""
     try:
         settings = _load()
-        conn = store.connect(settings.db_path)
-        remote_ids = _remote_notebook_ids(settings, verbose=verbose)
+        with _logged("notebooks", settings, ctx):
+            conn = store.connect(settings.db_path)
+            remote_ids = _remote_notebook_ids(settings, verbose=verbose)
 
-        table = Table(title="Configured notebooks")
-        table.add_column("Name", style="bold")
-        table.add_column("Notebook ID")
-        table.add_column("Remote")
-        table.add_column("Manifest")
-        table.add_column("Policy")
-        table.add_column("Last synced")
-        for name in sorted(settings.notebooks):
-            config = settings.notebooks[name]
-            exists = "" if Path(config.manifest_path).exists() else " [red](missing)[/red]"
-            if remote_ids is None:
-                remote = "[dim]?[/dim]"
-            elif config.notebook_id in remote_ids:
-                remote = "[green]ok[/green]"
-            else:
-                remote = "[red]missing[/red]"
-            table.add_row(
-                name,
-                config.notebook_id,
-                remote,
-                f"{config.manifest_path}{exists}",
-                settings.policy_for(config).value,
-                store.last_synced_at(conn, name) or "never",
-            )
-        console.print(table)
+            table = Table(title="Configured notebooks")
+            table.add_column("Name", style="bold")
+            table.add_column("Notebook ID")
+            table.add_column("Remote")
+            table.add_column("Manifest")
+            table.add_column("Policy")
+            table.add_column("Last synced")
+            for name in sorted(settings.notebooks):
+                config = settings.notebooks[name]
+                exists = "" if Path(config.manifest_path).exists() else " [red](missing)[/red]"
+                if remote_ids is None:
+                    remote = "[dim]?[/dim]"
+                elif config.notebook_id in remote_ids:
+                    remote = "[green]ok[/green]"
+                else:
+                    remote = "[red]missing[/red]"
+                table.add_row(
+                    name,
+                    config.notebook_id,
+                    remote,
+                    f"{config.manifest_path}{exists}",
+                    settings.policy_for(config).value,
+                    store.last_synced_at(conn, name) or "never",
+                )
+            console.print(table)
     except SyncError as exc:
         _fail(exc)
 
 
 @app.command()
 def history(
+    ctx: typer.Context,
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     limit: int = typer.Option(20, "--limit", "-n", help="Rows to show."),
 ) -> None:
     """Show recent sync runs."""
     try:
         settings = _load()
-        conn = store.connect(settings.db_path)
-        notebook_pk = None
-        if notebook:
-            config = settings.notebook(notebook)
-            notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
+        with _logged("history", settings, ctx):
+            conn = store.connect(settings.db_path)
+            notebook_pk = None
+            if notebook:
+                config = settings.notebook(notebook)
+                notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
 
-        table = Table(title="Sync history")
-        for column in ("Run", "Notebook", "Started", "Policy", "Status", "Add", "Refresh", "Skip", "Fail"):
-            table.add_column(column)
-        for row in store.recent_runs(conn, notebook_pk, limit):
-            status_text = row["status"] or ""
-            if row["dry_run"]:
-                status_text += " (dry-run)"
-            table.add_row(
-                str(row["id"]),
-                row["notebook_name"],
-                row["started_at"],
-                row["policy"],
-                status_text,
-                str(row["n_added"]),
-                str(row["n_refreshed"]),
-                str(row["n_skipped"]),
-                str(row["n_failed"]),
-            )
-        console.print(table)
+            table = Table(title="Sync history")
+            for column in ("Run", "Notebook", "Started", "Policy", "Status", "Add", "Refresh", "Skip", "Fail"):
+                table.add_column(column)
+            for row in store.recent_runs(conn, notebook_pk, limit):
+                status_text = row["status"] or ""
+                if row["dry_run"]:
+                    status_text += " (dry-run)"
+                table.add_row(
+                    str(row["id"]),
+                    row["notebook_name"],
+                    row["started_at"],
+                    row["policy"],
+                    status_text,
+                    str(row["n_added"]),
+                    str(row["n_refreshed"]),
+                    str(row["n_skipped"]),
+                    str(row["n_failed"]),
+                )
+            console.print(table)
     except SyncError as exc:
         _fail(exc)
 
 
 @app.command()
-def init() -> None:
+def init(ctx: typer.Context) -> None:
     """Create a starter .env and an example manifest."""
-    env_target = Path(".env")
-    if env_target.exists():
-        console.print("[yellow].env already exists, leaving it alone[/yellow]")
-    else:
-        # Prefer the repo's .env.example when running from a checkout; fall back to
-        # the inline template, since a wheel install has no repo root to look in.
-        example = Path(__file__).resolve().parent.parent.parent / ".env.example"
-        content = example.read_text(encoding="utf-8") if example.exists() else ENV_TEMPLATE
-        env_target.write_text(content, encoding="utf-8")
-        console.print("[green]created[/green] .env — edit it with your notebook IDs")
+    # load_settings(), not _load(): this command exists to be run *before* a valid
+    # .env does, so it must not require a configured notebook to get a log directory.
+    with _logged("init", load_settings(), ctx):
+        env_target = Path(".env")
+        if env_target.exists():
+            console.print("[yellow].env already exists, leaving it alone[/yellow]")
+            log.info("%s already exists, left alone", env_target)
+        else:
+            # Prefer the repo's .env.example when running from a checkout; fall back to
+            # the inline template, since a wheel install has no repo root to look in.
+            example = Path(__file__).resolve().parent.parent.parent / ".env.example"
+            content = example.read_text(encoding="utf-8") if example.exists() else ENV_TEMPLATE
+            env_target.write_text(content, encoding="utf-8")
+            console.print("[green]created[/green] .env — edit it with your notebook IDs")
+            log.info("created %s", env_target)
 
-    manifest_dir = Path("sources")
-    manifest_dir.mkdir(exist_ok=True)
-    sample = manifest_dir / "example.yaml"
-    if not sample.exists():
-        sample.write_text(
-            "sources:\n  - url: https://example.com/some-article\n", encoding="utf-8"
+        manifest_dir = Path("sources")
+        manifest_dir.mkdir(exist_ok=True)
+        sample = manifest_dir / "example.yaml"
+        if not sample.exists():
+            sample.write_text(
+                "sources:\n  - url: https://example.com/some-article\n", encoding="utf-8"
+            )
+            console.print(f"[green]created[/green] {sample}")
+            log.info("created %s", sample)
+
+        console.print(
+            "\nNext: run [bold]notebooklm login[/bold] to authenticate, "
+            "then [bold]notebooklm-sync sync --dry-run[/bold]."
         )
-        console.print(f"[green]created[/green] {sample}")
-
-    console.print(
-        "\nNext: run [bold]notebooklm login[/bold] to authenticate, "
-        "then [bold]notebooklm-sync sync --dry-run[/bold]."
-    )
 
 
 def _age(moment: datetime) -> str:

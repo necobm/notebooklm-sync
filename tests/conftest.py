@@ -128,12 +128,28 @@ def fake_http() -> FakeHttp:
     return FakeHttp()
 
 
+@pytest.fixture(autouse=True)
+def no_log_files(monkeypatch, tmp_path):
+    """The suite is the one thing that must never write a log file.
+
+    ``logs.py`` writes to ``./var/log`` by default, which would drop files into the
+    repo on every ``pytest`` run. ``SYNC_LOG=0`` is the real switch; the redirected
+    directory is the safety net for a test that deliberately turns logging back on.
+    """
+    monkeypatch.setenv("SYNC_LOG", "0")
+    monkeypatch.setenv("SYNC_LOG_DIR", str(tmp_path / "var" / "log"))
+
+
 @pytest.fixture
-def clean_env(monkeypatch):
+def clean_env(monkeypatch, tmp_path):
     """Strip inherited config so tests see only what they set themselves."""
     for key in list(os.environ):
         if key.startswith(("NOTEBOOK", "SYNC_")):
             monkeypatch.delenv(key, raising=False)
+    # Re-applied after the strip: `no_log_files` runs first, and losing its switch
+    # here would put var/log/ back into the repo for every test using this fixture.
+    monkeypatch.setenv("SYNC_LOG", "0")
+    monkeypatch.setenv("SYNC_LOG_DIR", str(tmp_path / "var" / "log"))
     return monkeypatch
 
 

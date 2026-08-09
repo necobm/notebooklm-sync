@@ -14,8 +14,10 @@ Upstream quirks encoded here (see the notebooklm-cli skill for the full list):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +25,10 @@ from typing import Any
 
 from .errors import AuthError, NlmError, NlmTimeout
 from .models import RemoteSource, WaitStatus
+
+#: Records only — ``logs.py`` decides whether anything is listening. Payloads are
+#: never logged: ``auth check --test`` describes the Google account behind them.
+log = logging.getLogger(__name__)
 
 BINARY = "notebooklm"
 
@@ -100,8 +106,10 @@ class NlmClient:
         env = dict(os.environ)
         if self.profile:
             env["NOTEBOOKLM_PROFILE"] = self.profile
+        log.info("$ %s", " ".join(argv))
+        started = time.monotonic()
         try:
-            return subprocess.run(
+            proc = subprocess.run(
                 argv,
                 capture_output=True,
                 text=True,
@@ -110,6 +118,7 @@ class NlmClient:
                 check=False,
             )
         except FileNotFoundError as exc:
+            log.error("not on PATH: %s", self.binary)
             raise NlmError(
                 "NOT_INSTALLED",
                 f"`{self.binary}` not found on PATH. Install it with "
@@ -117,9 +126,12 @@ class NlmClient:
                 argv=argv,
             ) from exc
         except subprocess.TimeoutExpired as exc:
+            log.error("timed out after %ss", timeout or self.timeout)
             raise NlmTimeout(
                 "TIMEOUT", f"`{' '.join(argv)}` timed out after {timeout or self.timeout}s", argv=argv
             ) from exc
+        log.info("rc=%d in %s", proc.returncode, _took(started))
+        return proc
 
     def _payload(self, proc: subprocess.CompletedProcess, argv: list[str]) -> Any:
         """Decode stdout JSON and raise on an in-band or exit-code error."""
@@ -135,12 +147,14 @@ class NlmClient:
         if isinstance(data, dict) and data.get("error"):
             message = str(data.get("message") or "Unknown error")
             code = data.get("code")
+            log.error("upstream error code=%s: %s", code, message)
             if _looks_like_auth(message, code):
                 raise AuthError(f"{message}\n{LOGIN_HINT}")
             raise NlmError(code, message, argv=argv)
 
         if proc.returncode != 0:
             message = (proc.stderr or text or "").strip() or f"exit code {proc.returncode}"
+            log.error("upstream failed rc=%d: %s", proc.returncode, message)
             if _looks_like_auth(message, None):
                 raise AuthError(f"{message}\n{LOGIN_HINT}")
             raise NlmError(None, message, argv=argv)
@@ -231,8 +245,12 @@ class NlmClient:
         proc = self._run(args, timeout=timeout + 30)
 
         if proc.returncode == 0:
+            log.info("wait %s: %s", source_id, WaitStatus.READY.value)
             return WaitResult(WaitStatus.READY)
         if proc.returncode == 2:
+            # Recorded explicitly: exit 2 is a timeout, not a failure, and a log that
+            # left it implicit would read as if the source had broken.
+            log.info("wait %s: %s (exit 2)", source_id, WaitStatus.TIMEOUT.value)
             return WaitResult(WaitStatus.TIMEOUT, f"still processing after {timeout}s")
 
         message = (proc.stderr or proc.stdout or "").strip()
@@ -244,7 +262,13 @@ class NlmClient:
                 message = str(data.get("message") or message)
         except json.JSONDecodeError:
             pass
+        log.error("wait %s: %s — %s", source_id, WaitStatus.FAILED.value, message)
         return WaitResult(WaitStatus.FAILED, message or "source processing failed")
+
+
+def _took(started: float) -> str:
+    """Wall-clock since ``started``, as ``812ms`` — the unit a slow run is read in."""
+    return f"{int((time.monotonic() - started) * 1000)}ms"
 
 
 def _looks_like_auth(message: str | None, code: str | None) -> bool:

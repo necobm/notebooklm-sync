@@ -27,6 +27,12 @@ DEFAULT_DISCOVERY_TTL = 86_400
 #: A rule that *does* state one always wins, in both directions — see ``crawl.py``.
 DEFAULT_DISCOVERY_MAX = 100
 
+#: Where ``logs.py`` writes ``<YYYY-MM-DD>-<command>.log``. Gitignored.
+DEFAULT_LOG_DIR = "./var/log"
+
+#: Days a log file is kept. ``0`` keeps everything.
+DEFAULT_LOG_RETENTION_DAYS = 30
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -42,7 +48,10 @@ class Settings:
     discovery_ttl: int = DEFAULT_DISCOVERY_TTL
     discovery_max: int = DEFAULT_DISCOVERY_MAX
     progress: bool = True
+    log_enabled: bool = True
+    log_dir: Path = Path(DEFAULT_LOG_DIR)
     log_level: str = "INFO"
+    log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
 
     def notebook(self, name: str) -> NotebookConfig:
         """Look up a configured notebook by name, case-insensitively."""
@@ -148,5 +157,12 @@ def load_settings(env_file: str | Path | None = ".env", environ: dict | None = N
             env.get("SYNC_DISCOVERY_MAX"), DEFAULT_DISCOVERY_MAX, where="SYNC_DISCOVERY_MAX"
         ),
         progress=_parse_bool(env.get("SYNC_PROGRESS"), True),
+        log_enabled=_parse_bool(env.get("SYNC_LOG"), True),
+        log_dir=Path((env.get("SYNC_LOG_DIR") or DEFAULT_LOG_DIR).strip()),
         log_level=(env.get("SYNC_LOG_LEVEL") or "INFO").strip().upper(),
+        log_retention_days=_parse_int(
+            env.get("SYNC_LOG_RETENTION_DAYS"),
+            DEFAULT_LOG_RETENTION_DAYS,
+            where="SYNC_LOG_RETENTION_DAYS",
+        ),
     )

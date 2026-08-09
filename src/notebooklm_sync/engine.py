@@ -10,6 +10,7 @@ the manifest are reported as orphans and left alone.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from .errors import NlmError
@@ -26,6 +27,10 @@ from .models import (
     WaitStatus,
 )
 from .nlm import NlmClient
+
+#: Only ``execute()`` and ``apply_stale_filter()`` emit. ``plan()`` is pure, and a
+#: log call is I/O — the plan summary is recorded one frame up, by ``cli.py``.
+log = logging.getLogger(__name__)
 
 
 def resolve_policy(
@@ -169,7 +174,9 @@ def apply_stale_filter(
             stale = client.is_stale(notebook_id, action.source_id)
         except NlmError as exc:
             action.message = f"staleness unknown ({exc}); refreshing anyway"
+            log.debug("stale? %s -> unknown (%s); refreshing anyway", action.url, exc)
             continue
+        log.debug("stale? %s -> %s", action.url, stale)
         if stale is False:
             action.action = Action.SKIP
             action.reason = "not stale"
@@ -251,7 +258,22 @@ def execute(
             action.outcome = Outcome.FAILED
             action.message = str(exc)
 
+        _record(action)
         if on_action is not None:
             on_action(action)
 
     return plan_.actions
+
+
+def _record(action: PlannedAction) -> None:
+    """One line per executed action. FAILED is the only one worth an ERROR."""
+    outcome = action.outcome.value if action.outcome else "?"
+    detail = action.message or action.reason
+    emit = log.error if action.outcome is Outcome.FAILED else log.info
+    emit(
+        "%s %s -> %s%s",
+        action.action.value,
+        action.url or action.source_id or "",
+        outcome,
+        f" ({detail})" if detail else "",
+    )

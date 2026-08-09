@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
@@ -10,6 +11,8 @@ from .crawl import parse_rule
 from .errors import ManifestError
 from .matching import dedupe_entries
 from .models import ManifestEntry, SyncPolicy
+
+log = logging.getLogger(__name__)
 
 VALID_TYPES = frozenset({"url", "youtube", "text", "file"})
 
@@ -83,6 +86,7 @@ def parse_manifest(data: object, *, origin: str = "<manifest>") -> list[Manifest
         # Duplicates are a manifest smell, not an error — the user gets told, not blocked.
         for url in duplicates:
             print(f"warning: {origin} lists {url} more than once; keeping the first entry")
+            log.warning("%s lists %s more than once; keeping the first entry", origin, url)
     return deduped
 
 

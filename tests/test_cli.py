@@ -543,3 +543,137 @@ def test_no_progress_does_not_change_the_exit_code_contract(project):
 
     assert result.exit_code == 3
     assert "notebooklm login" in result.output
+
+
+# -- command logs (feature 005) -----------------------------------------------
+#
+# The suite disables logging globally (`no_log_files` in conftest.py), so these
+# tests turn it back on explicitly and point it at tmp_path — the same rule the
+# `db_path` fixture follows for the database.
+
+
+@pytest.fixture
+def logging_on(project, clean_env, tmp_path):
+    """`project`, with logging enabled into a throwaway var/log."""
+    clean_env.setenv("SYNC_LOG", "1")
+    clean_env.setenv("SYNC_LOG_DIR", str(tmp_path / "var" / "log"))
+    project.log_dir = tmp_path / "var" / "log"
+    return project
+
+
+def log_text(log_dir, command):
+    files = list(log_dir.glob(f"*-{command}.log"))
+    assert files, f"no log file for {command} in {sorted(log_dir.iterdir())}"
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_a_command_writes_a_log_named_by_date_and_command(logging_on):
+    logging_on.scenario({"source list": {"sources": []}})
+    assert runner.invoke(app, ["sync", "research", "--dry-run"]).exit_code == 0
+
+    body = log_text(logging_on.log_dir, "sync")
+    # Resolved parameters, not raw argv — see cli._invocation.
+    assert "start: sync dry_run notebook=research" in body
+    assert "done: exit=0" in body
+
+
+def test_the_log_records_every_upstream_call_with_its_exit_code(logging_on):
+    logging_on.scenario(
+        {
+            "source list": {"sources": []},
+            "auth check": {"status": "ok"},
+            "source add": {"id": "s9", "url": "https://example.com/a", "type": "web_page"},
+            "source wait": {"stdout": {"status": "READY"}, "exit": 0},
+        }
+    )
+    assert runner.invoke(app, ["sync", "research"]).exit_code == 0
+
+    body = log_text(logging_on.log_dir, "sync")
+    assert "$ notebooklm auth check --test --json" in body
+    assert "rc=0 in " in body
+    assert "add https://example.com/a -> ok" in body
+    assert "plan: run=1 policy=skip add=1" in body
+
+
+def test_a_failure_is_recorded_with_its_exit_code(logging_on):
+    logging_on.scenario(
+        {"auth check": {"stdout": {"error": True, "message": "Authentication expired"}, "exit": 1}}
+    )
+    assert runner.invoke(app, ["sync", "research"]).exit_code == 3
+
+    body = log_text(logging_on.log_dir, "sync")
+    assert "failed: " in body and "(exit=3)" in body
+
+
+def test_an_unknown_notebook_is_recorded_before_it_exits_two(logging_on):
+    assert runner.invoke(app, ["sync", "nope"]).exit_code == 2
+
+    body = log_text(logging_on.log_dir, "sync")
+    assert "Unknown notebook 'nope'" in body
+    assert "(exit=2)" in body
+
+
+def test_each_command_gets_its_own_file(logging_on):
+    logging_on.scenario({"source list": {"sources": []}})
+    assert runner.invoke(app, ["sync", "research", "--dry-run"]).exit_code == 0
+    assert runner.invoke(app, ["status", "research"]).exit_code == 0
+
+    assert "start: sync " in log_text(logging_on.log_dir, "sync")
+    assert "start: status " in log_text(logging_on.log_dir, "status")
+
+
+def test_repeated_invocations_do_not_duplicate_records(logging_on):
+    """CliRunner runs many commands in one process; a leaked handler would double."""
+    logging_on.scenario({"source list": {"sources": []}})
+    for _ in range(3):
+        assert runner.invoke(app, ["sync", "research", "--dry-run"]).exit_code == 0
+
+    assert log_text(logging_on.log_dir, "sync").count("start: sync ") == 3
+
+
+def test_no_ansi_or_rich_markup_reaches_the_log(logging_on):
+    logging_on.scenario({"source list": {"sources": [REMOTE_SOURCE]}})
+    assert runner.invoke(app, ["sync", "research", "--dry-run"]).exit_code == 0
+
+    body = log_text(logging_on.log_dir, "sync")
+    assert "\x1b[" not in body
+    assert "[dim]" not in body and "[/dim]" not in body
+
+
+def test_no_payload_reaches_the_log(logging_on):
+    """`auth check --test` describes the Google account; only rc and argv are kept."""
+    logging_on.scenario(
+        {
+            "source list": {"sources": []},
+            "auth check": {"status": "ok", "email": "someone@example.com"},
+        }
+    )
+    assert runner.invoke(app, ["sync", "research"]).exit_code == 0
+
+    assert "someone@example.com" not in log_text(logging_on.log_dir, "sync")
+
+
+def test_debug_records_the_http_fetches_that_info_omits(site, clean_env, tmp_path):
+    use_rule(site, f"{BASE}/*[except=blog]")
+    log_dir = tmp_path / "var" / "log"
+    clean_env.setenv("SYNC_LOG", "1")
+    clean_env.setenv("SYNC_LOG_DIR", str(log_dir))
+
+    assert runner.invoke(app, ["expand", "research"]).exit_code == 0
+    quiet = log_text(log_dir, "expand")
+
+    clean_env.setenv("SYNC_LOG_LEVEL", "DEBUG")
+    assert runner.invoke(app, ["expand", "research", "--refresh-discovery"]).exit_code == 0
+    loud = log_text(log_dir, "expand")
+
+    assert "GET " not in quiet
+    assert "GET " in loud
+
+
+def test_logging_off_writes_nothing(project, clean_env, tmp_path):
+    clean_env.setenv("SYNC_LOG", "0")
+    clean_env.setenv("SYNC_LOG_DIR", str(tmp_path / "var" / "log"))
+    project.scenario({"source list": {"sources": []}})
+
+    assert runner.invoke(app, ["sync", "research", "--dry-run"]).exit_code == 0
+    assert not (tmp_path / "var" / "log").exists()

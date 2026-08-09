@@ -35,6 +35,21 @@ Order and status of the features. Each entry points at its folder in `../feature
    not a TTY, which is why all 212 existing tests passed unmodified. No new dependency; 239 tests
    pass. Not verified in tmux, and not against a live NotebookLM ingest.
 
+5. **005 · [Command and action logging](../features/005-command-logging/)** — every invocation
+   writes a durable plain-text record to `var/log/<YYYY-MM-DD>-<command>.log`, so a day's `sync`
+   runs share one file and each line carries a token identifying its run: the upstream argv with its
+   exit code and duration, every executed action with its outcome, the plan and result counts, and
+   the command's own exit code. Adds the project's fourth seam — `logs.py`, the only module allowed
+   to attach a handler or open a log file — with every other module emitting through
+   `logging.getLogger(__name__)`, which writes nothing while no session is open. That is also how
+   the suite stays silent: an autouse fixture sets `SYNC_LOG=0`, so all 239 existing tests passed
+   unmodified. Fills the gap between the SQLite tables, which record what `sync` *decided* and
+   nothing at all about the other five commands, and stderr, which is gone as soon as the terminal
+   scrolls. `SYNC_LOG_LEVEL=DEBUG` adds every HTTP fetch; retention is by age, not by size. No new
+   dependency — stdlib `logging`, chosen over `structlog`/`loguru` because the queryable view of a
+   run is already the SQLite audit log. 271 tests pass. Not yet exercised against a live
+   NotebookLM run.
+
 ## Next 🔜
 
 *Nothing scheduled. Pick the next item from the backlog and give it a `features/NNN-…/` folder.*

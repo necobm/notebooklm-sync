@@ -13,7 +13,8 @@ The technical reference for this project. No feature plan should contradict it.
 - **Config:** `python-dotenv` reading `.env`, with precedence `os.environ` > `.env` > defaults.
   Keys: `NOTEBOOKS` + per-notebook `_ID`/`_SOURCES`/`_POLICY`, `SYNC_POLICY`, `SYNC_DB_PATH`,
   `SYNC_WAIT_TIMEOUT`, `SYNC_CLI_TIMEOUT`, `SYNC_HTTP_TIMEOUT`, `SYNC_DISCOVERY_TTL`,
-  `SYNC_DISCOVERY_MAX`, `SYNC_PROGRESS`, `SYNC_LOG_LEVEL`.
+  `SYNC_DISCOVERY_MAX`, `SYNC_PROGRESS`, `SYNC_LOG`, `SYNC_LOG_DIR`, `SYNC_LOG_LEVEL`,
+  `SYNC_LOG_RETENTION_DAYS`.
 - **Manifests:** PyYAML.
 - **Database:** stdlib `sqlite3` — WAL journal mode, `foreign_keys=ON`, schema version stamped in
   `PRAGMA user_version` (currently `2`).
@@ -24,7 +25,10 @@ The technical reference for this project. No feature plan should contradict it.
 - **Upstream dependency:** the `notebooklm` CLI (upstream package `notebooklm-py`, v0.7.3),
   invoked as a **subprocess**. Not a library dependency — it is expected to be installed on the
   machine (a uv tool).
-- **Tests:** pytest, 239 tests, **fully offline** — no network, no Google auth.
+- **Logging:** stdlib `logging` only. One rotating-by-date file per command under `var/log/`
+  (gitignored), written by `logs.py`. No `structlog`, no `loguru` — the structured, queryable view
+  of a run is the SQLite audit log, and a second one would be a second source of truth.
+- **Tests:** pytest, 271 tests, **fully offline** — no network, no Google auth.
 - **Lint:** ruff, `line-length = 100`, default rule set.
 - **Type checking:** none configured yet, despite the code being fully annotated. See the roadmap.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) — `uv sync`, `ruff check`, `pytest` on push
@@ -42,6 +46,10 @@ Everything under `src/notebooklm_sync/`:
   written the no-op implementation), `NullReporter`, `LiveReporter` and `make_reporter()`. Imports
   Rich and nothing from the two seams; the library modules announce events through callbacks and
   print nothing.
+- `logs.py` — **the only module that opens a log file or attaches a handler.** `session()` brackets
+  one CLI invocation, writing `<log_dir>/<YYYY-MM-DD>-<command>.log` and stamping a run token on
+  every record; `log_path()` and `prune()` are the rest of it. Every other module only calls
+  `logging.getLogger(__name__)` and emits — with no session open, that writes nothing.
 - `config.py` — `.env` + environment → a frozen `Settings`. Parses `NOTEBOOKS` plus
   `NOTEBOOK_<KEY>_ID` / `_SOURCES` / `_POLICY` (non-alphanumeric chars become `_`, uppercased).
 - `manifest.py` — YAML load and validation. `parse_manifest()` is IO-free (testable against
@@ -208,6 +216,11 @@ a fullscreen TUI — no alternate screen, no keybindings, no focus model — so 
   `http.client` or `socket` elsewhere. Same argument, same payoff: `fetch` is injectable, so
   `fake_http` can serve a whole website without a socket. (`urllib.parse` is pure string work and
   is used freely.)
+- **No log-file I/O anywhere in `src/` except `logs.py`** — no `basicConfig`, no `addHandler`, no
+  `FileHandler` elsewhere. Everything else emits through `logging.getLogger(__name__)`, which is
+  inert until `logs.session()` attaches a handler. That is what keeps the test suite from writing
+  files and an embedded import from writing anything at all. A log record is a *record of what
+  happened*, never a channel to the person at the terminal — that is `console.print`'s job.
 - **No second, dry-run-only code path.** `--dry-run` runs the identical `plan()` and stops before
   side effects. A parallel path drifts and then lies about what a real run would do.
 - **Never delete a source.** Do not call `source delete`, `source delete-by-title` or

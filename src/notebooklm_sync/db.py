@@ -8,11 +8,14 @@ what actually happened.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import Action, Outcome, PlannedAction, SyncSummary
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
 
@@ -114,6 +117,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
         # Future migrations branch on `current` here before stamping.
+        log.debug("schema v%s -> v%s", current, SCHEMA_VERSION)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 

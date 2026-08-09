@@ -101,6 +101,8 @@ uv run notebooklm-sync sync research -v               # echo every notebooklm ar
 uv run notebooklm-sync expand research                # what do this manifest's /* rules match?
 uv run notebooklm-sync sync research --refresh-discovery   # re-read sites, ignore the URL cache
 uv run notebooklm-sync sync research --no-progress         # no live display (implied by -v)
+tail -f var/log/$(date +%F)-sync.log                       # what every run actually did
+SYNC_LOG_LEVEL=DEBUG uv run notebooklm-sync expand research  # + every HTTP fetch, in the log
 ```
 
 CI (`.github/workflows/ci.yml`) runs `ruff check` and `pytest` on push and pull request against
@@ -129,10 +131,11 @@ engine.plan()  (entries, remote, policy) →  SyncPlan[PlannedAction]     ← PU
 engine.execute()  PlannedAction  →  Outcome, via nlm.py                 ← side effects
 db.py         plan/outcomes  →  sync_runs + sync_events + sources mirror
 progress.py   on_* callbacks  →  a live stderr display                  ← THE ONLY RENDERER
+logs.py       one CLI run  →  var/log/<date>-<command>.log             ← THE ONLY LOG WRITER
 cli.py        Typer commands: sync · status · expand · notebooks · history · init
 ```
 
-### The five invariants
+### The six invariants
 
 These carry the whole design. Each has a reason that is not obvious from the code, and breaking
 any one of them breaks something far away from where you edited.
@@ -159,6 +162,15 @@ progress display both work without either module importing Rich. `progress.py` i
 that renders progress, and `grep -rn "rich" src/` must match nothing but it and `cli.py`. Note
 `engine.execute`'s `on_step` fires *before* each unit of work: `source wait` can block for
 `SYNC_WAIT_TIMEOUT` seconds, so announcing it afterwards would announce it too late to matter.
+
+**All log-file I/O goes through `logs.py`.** No `basicConfig`, no `addHandler`, no `FileHandler`
+anywhere else in `src/` — `grep -rnE "basicConfig|addHandler|FileHandler" src/` must match `logs.py`
+alone. Every other module only calls `logging.getLogger(__name__)` and emits; with no handler
+attached, that writes nothing, which is why the test suite (and a library import) produce no files.
+This is the same notify-don't-render rule in stdlib-logging vocabulary, and it carries the same
+corollary: a log record is a *record of what happened*, never a way to tell the user something.
+`cli.py` opens exactly one `logs.session()` per command, writing `var/log/<date>-<command>.log`;
+`engine.plan()` is excluded on purpose, because logging is I/O and `plan()` must stay pure.
 
 **Sync never deletes.** Sources in the notebook that are absent from the manifest ("orphans")
 are reported, never removed — a typo in a manifest must not be able to destroy a notebook. This
@@ -260,8 +272,12 @@ else's machine.
   the flags and the cache under test). An unregistered URL returns 404, so a forgotten stub fails
   loudly instead of quietly reaching the real internet. Helpers: `add`, `add_sitemap`,
   `add_sitemap_index`; `.requests` is the log.
-- `clean_env` — strips inherited `NOTEBOOK*` / `SYNC_*` so a test sees only what it sets.
+- `clean_env` — strips inherited `NOTEBOOK*` / `SYNC_*` so a test sees only what it sets, then
+  re-applies the logging off-switch (the strip would otherwise restore the `./var/log` default).
 - `db_path` — a tmp database, never the repo's `./notebooklm-sync.db`.
+- `no_log_files` — **autouse**: sets `SYNC_LOG=0` and points `SYNC_LOG_DIR` at `tmp_path`, so the
+  suite never writes a log file into the repo. A test that wants one turns it back on explicitly,
+  as `tests/test_logs.py` and the log cases in `tests/test_cli.py` do.
 
 See the `test-fixtures` skill for the scenario recipes that reproduce each sharp edge above.
 

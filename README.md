@@ -59,29 +59,23 @@ Flags worth knowing:
 | `--no-progress` | Don't show the live progress display. Implied by `-v`. |
 | `-v` / `--verbose` | Print every `notebooklm` invocation and every HTTP request to stderr, so you can reproduce it by hand. |
 
-### Progress
+### Logs
 
-`sync`, `status` and `expand` show a live display while they work — the three commands that can run
-for a while. Adding a source waits for NotebookLM to ingest it (up to `SYNC_WAIT_TIMEOUT`, 120s each
-by default), and a crawl rule on a site with no sitemap reads pages one at a time.
+Every command appends to `var/log/<YYYY-MM-DD>-<command>.log`, so a day's `sync` runs share one
+file and each line carries a short token identifying its run:
 
 ```
-  ✓ discovery   1 rule → 37 URL(s)
-  ✓ auth        credentials ok
-  ✓ sources     41 in notebook
-  ⠹ syncing     ━━━━━━━━━━╸━━━━━━━━━  12/41  0:00:07
-                add   https://mundana.us/blog/post-12
-                ⠋ waiting for ingestion  0:00:04
+2026-08-09 12:00:01,503 INFO  8f3a2c1d nlm       $ notebooklm source add -n 3fb8… https://… --json
+2026-08-09 12:00:02,315 INFO  8f3a2c1d nlm       rc=0 in 812ms
+2026-08-09 12:00:19,882 INFO  8f3a2c1d engine    add https://… -> pending (still processing after 15s)
+2026-08-09 12:00:19,930 INFO  8f3a2c1d cli       done: exit=0
 ```
 
-It writes to **stderr** and wipes itself when the run ends, so `notebooklm-sync sync ... | cat`
-gives you exactly what it always did. It also turns itself off automatically when stderr is not a
-terminal — pipes, redirects, CI — and whenever `-v` is used, since both would be writing to the
-same place. To disable it permanently, set `SYNC_PROGRESS=0` in your `.env`.
-
-`notebooks` checks each configured `NOTEBOOK_<NAME>_ID` against NotebookLM and marks it `ok` or
-`missing`. If it can't reach NotebookLM — expired cookies, no network — it says so and still shows
-your configuration.
+The progress display is gone as soon as the run ends and the SQLite tables only record what `sync`
+*decided*; this is where the exit codes, durations and upstream argv live afterwards. `SYNC_LOG=0`
+turns it off, `SYNC_LOG_DIR` moves it, `SYNC_LOG_LEVEL=DEBUG` adds every HTTP request, and files
+older than `SYNC_LOG_RETENTION_DAYS` (30) are removed on the next run. `var/` is gitignored, and
+no credential, cookie or upstream payload is ever written to it.
 
 ## Web crawl rules
 
