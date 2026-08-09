@@ -7,13 +7,14 @@ what actually happened.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import Action, Outcome, PlannedAction, SyncSummary
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notebooks (
@@ -71,6 +72,17 @@ CREATE TABLE IF NOT EXISTS sync_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_run ON sync_events (run_id);
+
+-- Discovered URLs for one crawl rule (schema v2). Deliberately not tied to a
+-- notebook: a rule resolves to the same pages whoever asked, so two notebooks
+-- sharing a rule share one fetch.
+CREATE TABLE IF NOT EXISTS discovery_cache (
+    rule_key   TEXT PRIMARY KEY,
+    rule       TEXT NOT NULL,
+    urls       TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 """
 
 
@@ -92,12 +104,63 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables and stamp the schema version. Idempotent."""
+    """Create tables and stamp the schema version. Idempotent.
+
+    v1 -> v2 added ``discovery_cache``, which needs no migration branch: every
+    statement in ``SCHEMA`` is ``CREATE ... IF NOT EXISTS``, so an existing v1
+    database gains the table and the stamp on its next open.
+    """
     conn.executescript(SCHEMA)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
         # Future migrations branch on `current` here before stamping.
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+
+
+def get_discovery(
+    conn: sqlite3.Connection, rule_key: str, ttl: int
+) -> tuple[list[str], str, datetime] | None:
+    """Return ``(urls, source, fetched_at)`` for ``rule_key`` if still fresh.
+
+    A row older than ``ttl`` seconds is treated as absent rather than deleted — the
+    next successful fetch overwrites it, and a failed one leaves the stale row where
+    a human can still see what was last discovered.
+    """
+    row = conn.execute(
+        "SELECT urls, source, fetched_at FROM discovery_cache WHERE rule_key = ?",
+        (rule_key,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    fetched_at = datetime.fromisoformat(row["fetched_at"])
+    if (datetime.now(UTC) - fetched_at).total_seconds() > ttl:
+        return None
+    return json.loads(row["urls"]), row["source"], fetched_at
+
+
+def put_discovery(
+    conn: sqlite3.Connection,
+    rule_key: str,
+    rule: str,
+    urls: list[str],
+    source: str,
+    fetched_at: datetime,
+) -> None:
+    """Store the URLs a rule discovered, replacing any earlier entry."""
+    conn.execute(
+        """
+        INSERT INTO discovery_cache (rule_key, rule, urls, source, fetched_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(rule_key) DO UPDATE SET
+            rule = excluded.rule,
+            urls = excluded.urls,
+            source = excluded.source,
+            fetched_at = excluded.fetched_at
+        """,
+        (rule_key, rule, json.dumps(urls), source, fetched_at.isoformat(timespec="seconds")),
+    )
     conn.commit()
 
 

@@ -91,3 +91,46 @@ def test_repo_example_manifest_is_valid():
     # The shipped example must actually work, or `init` hands users a broken file.
     entries = load_manifest("sources/example.yaml")
     assert len(entries) >= 1
+
+
+# -- crawl rules ---------------------------------------------------------------
+
+
+def test_a_wildcard_url_becomes_a_rule_not_a_source():
+    entries = parse_manifest({"sources": ["https://www.mundana.us/*[except=blog]"]})
+    assert entries[0].rule is not None
+    assert entries[0].rule.excludes == ("/blog",)
+    # It is a declaration, not a URL: nothing normalizes it until it is expanded.
+    assert entries[0].normalized_url == ""
+
+
+def test_a_rule_works_in_the_mapping_form_and_inherits_type_and_policy():
+    entries = parse_manifest(
+        {"sources": [{"url": "https://site.com/*", "type": "url", "policy": "override"}]}
+    )
+    assert entries[0].rule is not None
+    assert entries[0].type == "url"
+    assert entries[0].policy is SyncPolicy.OVERRIDE
+
+
+def test_a_rule_may_not_carry_a_title():
+    with pytest.raises(ManifestError, match="cannot carry a 'title'"):
+        parse_manifest({"sources": [{"url": "https://site.com/*", "title": "Everything"}]})
+
+
+def test_a_malformed_rule_is_a_manifest_error_not_a_url():
+    with pytest.raises(ManifestError, match="unknown modifier"):
+        parse_manifest({"sources": ["https://site.com/*[depth=2]"]})
+
+
+def test_plain_urls_still_have_no_rule():
+    entries = parse_manifest({"sources": ["https://example.com/a"]})
+    assert entries[0].rule is None
+    assert entries[0].normalized_url == "https://example.com/a"
+
+
+def test_rules_are_not_deduped_against_each_other_before_expansion():
+    entries = parse_manifest(
+        {"sources": ["https://site.com/*[except=a]", "https://site.com/*[except=b]"]}
+    )
+    assert len(entries) == 2

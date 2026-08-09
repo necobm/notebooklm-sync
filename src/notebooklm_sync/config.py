@@ -18,6 +18,14 @@ from .models import NotebookConfig, SyncPolicy
 DEFAULT_DB_PATH = "./notebooklm-sync.db"
 DEFAULT_WAIT_TIMEOUT = 120
 DEFAULT_CLI_TIMEOUT = 300
+DEFAULT_HTTP_TIMEOUT = 30
+
+#: How long a crawl rule's discovered URL list stays usable before it is re-fetched.
+DEFAULT_DISCOVERY_TTL = 86_400
+
+#: How many URLs one crawl rule may contribute when it states no ``[max=N]``.
+#: A rule that *does* state one always wins, in both directions — see ``crawl.py``.
+DEFAULT_DISCOVERY_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,9 @@ class Settings:
     db_path: Path = Path(DEFAULT_DB_PATH)
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT
     cli_timeout: int = DEFAULT_CLI_TIMEOUT
+    http_timeout: int = DEFAULT_HTTP_TIMEOUT
+    discovery_ttl: int = DEFAULT_DISCOVERY_TTL
+    discovery_max: int = DEFAULT_DISCOVERY_MAX
     log_level: str = "INFO"
 
     def notebook(self, name: str) -> NotebookConfig:
@@ -114,6 +125,15 @@ def load_settings(env_file: str | Path | None = ".env", environ: dict | None = N
         ),
         cli_timeout=_parse_int(
             env.get("SYNC_CLI_TIMEOUT"), DEFAULT_CLI_TIMEOUT, where="SYNC_CLI_TIMEOUT"
+        ),
+        http_timeout=_parse_int(
+            env.get("SYNC_HTTP_TIMEOUT"), DEFAULT_HTTP_TIMEOUT, where="SYNC_HTTP_TIMEOUT"
+        ),
+        discovery_ttl=_parse_int(
+            env.get("SYNC_DISCOVERY_TTL"), DEFAULT_DISCOVERY_TTL, where="SYNC_DISCOVERY_TTL"
+        ),
+        discovery_max=_parse_int(
+            env.get("SYNC_DISCOVERY_MAX"), DEFAULT_DISCOVERY_MAX, where="SYNC_DISCOVERY_MAX"
         ),
         log_level=(env.get("SYNC_LOG_LEVEL") or "INFO").strip().upper(),
     )

@@ -106,3 +106,71 @@ def test_summarize_counts_by_action_and_outcome():
     summary = store.summarize(actions)
     assert (summary.added, summary.pending, summary.failed) == (1, 1, 1)
     assert (summary.refreshed, summary.skipped, summary.orphans) == (1, 1, 1)
+
+
+# -- discovery cache (schema v2) ----------------------------------------------
+
+
+def test_schema_version_is_two(db_path):
+    conn = store.connect(db_path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_a_v1_database_is_upgraded_in_place(db_path):
+    """v1 -> v2 only adds a table, so reopening is the whole migration."""
+    import sqlite3
+
+    legacy = sqlite3.connect(db_path)
+    legacy.execute("PRAGMA user_version = 1")
+    legacy.commit()
+    legacy.close()
+
+    conn = store.connect(db_path)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM discovery_cache").fetchone()[0] == 0
+
+
+def test_discovery_round_trips(db_path):
+    from datetime import UTC, datetime
+
+    conn = store.connect(db_path)
+    now = datetime.now(UTC)
+    store.put_discovery(conn, "key", "https://site.com/*", ["https://site.com/a"], "sitemap", now)
+
+    urls, source, fetched_at = store.get_discovery(conn, "key", ttl=3600)
+
+    assert urls == ["https://site.com/a"]
+    assert source == "sitemap"
+    assert fetched_at == now.replace(microsecond=0)
+
+
+def test_discovery_put_replaces_an_earlier_entry(db_path):
+    from datetime import UTC, datetime
+
+    conn = store.connect(db_path)
+    now = datetime.now(UTC)
+    store.put_discovery(conn, "key", "r", ["https://site.com/a"], "sitemap", now)
+    store.put_discovery(conn, "key", "r", ["https://site.com/b"], "crawl", now)
+
+    urls, source, _ = store.get_discovery(conn, "key", ttl=3600)
+
+    assert urls == ["https://site.com/b"]
+    assert source == "crawl"
+    assert conn.execute("SELECT COUNT(*) FROM discovery_cache").fetchone()[0] == 1
+
+
+def test_an_expired_entry_reads_as_absent_but_is_not_deleted(db_path):
+    from datetime import UTC, datetime, timedelta
+
+    conn = store.connect(db_path)
+    old = datetime.now(UTC) - timedelta(days=2)
+    store.put_discovery(conn, "key", "r", ["https://site.com/a"], "sitemap", old)
+
+    assert store.get_discovery(conn, "key", ttl=3600) is None
+    assert conn.execute("SELECT COUNT(*) FROM discovery_cache").fetchone()[0] == 1
+
+
+def test_an_unknown_key_reads_as_none(db_path):
+    conn = store.connect(db_path)
+    assert store.get_discovery(conn, "nope", ttl=3600) is None

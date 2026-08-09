@@ -84,9 +84,15 @@ def normalize_url(url: str) -> str:
 
 
 def normalize_entry(entry: ManifestEntry) -> ManifestEntry:
-    """Return ``entry`` with ``normalized_url`` populated."""
+    """Return ``entry`` with ``normalized_url`` populated.
+
+    An unexpanded crawl rule is returned untouched: its ``url`` is a pattern like
+    ``https://site.com/*[except=blog]``, which is not a URL and would be rejected.
+    """
     from dataclasses import replace
 
+    if entry.rule is not None:
+        return entry
     return replace(entry, normalized_url=normalize_url(entry.url))
 
 
@@ -127,13 +133,24 @@ def index_sources(sources: list[RemoteSource]) -> tuple[dict[str, RemoteSource],
 
 
 def dedupe_entries(entries: list[ManifestEntry]) -> tuple[list[ManifestEntry], list[str]]:
-    """Drop manifest entries that repeat a normalized URL, keeping the first."""
-    seen: dict[str, ManifestEntry] = {}
+    """Drop manifest entries that repeat a normalized URL, keeping the first.
+
+    Unexpanded crawl rules pass through in order and are never deduplicated against
+    each other — two rules are only comparable once resolved, which happens later in
+    ``discovery.expand_entries()``.
+    """
+    seen: set[str] = set()
+    kept: list[ManifestEntry] = []
     duplicates: list[str] = []
+
     for entry in entries:
+        if entry.rule is not None:
+            kept.append(entry)
+            continue
         normalized = normalize_entry(entry)
         if normalized.normalized_url in seen:
             duplicates.append(normalized.normalized_url)
             continue
-        seen[normalized.normalized_url] = normalized
-    return list(seen.values()), duplicates
+        seen.add(normalized.normalized_url)
+        kept.append(normalized)
+    return kept, duplicates

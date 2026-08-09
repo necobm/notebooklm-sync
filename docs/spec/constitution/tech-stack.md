@@ -13,11 +13,15 @@ The technical reference for this project. No feature plan should contradict it.
 - **Config:** `python-dotenv` reading `.env`, with precedence `os.environ` > `.env` > defaults.
 - **Manifests:** PyYAML.
 - **Database:** stdlib `sqlite3` — WAL journal mode, `foreign_keys=ON`, schema version stamped in
-  `PRAGMA user_version` (currently `1`).
+  `PRAGMA user_version` (currently `2`).
+- **HTTP:** stdlib only — `urllib.request` to fetch, `xml.etree.ElementTree` for sitemaps,
+  `html.parser` for links, `gzip` for `.gz` sitemaps. No `httpx`, no `requests`, no `beautifulsoup`.
+  The sitemap path is one request and the crawl fallback is capped and cached, so there is nothing
+  for pooling or concurrency to win.
 - **Upstream dependency:** the `notebooklm` CLI (upstream package `notebooklm-py`, v0.7.3),
   invoked as a **subprocess**. Not a library dependency — it is expected to be installed on the
   machine (a uv tool).
-- **Tests:** pytest, 117 tests, **fully offline** — no network, no Google auth.
+- **Tests:** pytest, 212 tests, **fully offline** — no network, no Google auth.
 - **Lint:** ruff, `line-length = 100`, default rule set.
 - **Type checking:** none configured yet, despite the code being fully annotated. See the roadmap.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) — `uv sync`, `ruff check`, `pytest` on push
@@ -28,34 +32,41 @@ The technical reference for this project. No feature plan should contradict it.
 
 Everything under `src/notebooklm_sync/`:
 
-- `cli.py` — Typer app and Rich rendering. Commands: `sync`, `status`, `notebooks`, `history`,
-  `init`. All errors funnel through one handler that maps a typed error to its exit code — except
-  `notebooks`, which degrades (see *Domain model*).
+- `cli.py` — Typer app and Rich rendering. Commands: `sync`, `status`, `expand`, `notebooks`,
+  `history`, `init`. All errors funnel through one handler that maps a typed error to its exit code
+  — except `notebooks`, which degrades (see *Domain model*).
 - `config.py` — `.env` + environment → a frozen `Settings`. Parses `NOTEBOOKS` plus
   `NOTEBOOK_<KEY>_ID` / `_SOURCES` / `_POLICY` (non-alphanumeric chars become `_`, uppercased).
 - `manifest.py` — YAML load and validation. `parse_manifest()` is IO-free (testable against
   literals); `load_manifest()` does the file read. Accepts a bare string as URL-only shorthand.
 - `matching.py` — URL normalization and indexing. The identity layer: `normalize_url()`,
-  `normalize_entry()`, `normalize_source()`, `index_sources()`, `dedupe_entries()`.
+  `normalize_entry()`, `normalize_source()`, `index_sources()`, `dedupe_entries()`. The last two
+  pass unexpanded crawl rules through untouched — a rule string is not a URL.
+- `crawl.py` — the crawl-rule *language*, pure: `parse_rule()`, `rule_key()`, `in_scope()`,
+  `filter_urls()`. Everything a `/*` entry means, testable against literals.
+- `discovery.py` — **the single HTTP boundary.** `Discoverer` resolves a rule to candidate URLs
+  (robots/sitemap first, HTML crawl second) with an injectable `fetch`; `expand_entries()` turns
+  rule entries into plain ones between `load_manifest()` and `plan()`.
 - `nlm.py` — **the single subprocess boundary.** `NlmClient` wraps every `notebooklm` invocation,
   appends `--json`, injects the profile, and records each argv in `self.calls`.
 - `engine.py` — reconciliation. `plan()` is pure (manifest + remote sources → `SyncPlan`);
   `apply_stale_filter()` is a read-only probe step used by `--only-stale`; `execute()` performs the
   actions and catches per-action failures.
-- `db.py` — SQLite schema and persistence: `notebooks`, `sources`, and the append-only
-  `sync_runs` / `sync_events` audit tables.
+- `db.py` — SQLite schema and persistence: `notebooks`, `sources`, the append-only
+  `sync_runs` / `sync_events` audit tables, and the global `discovery_cache`.
 - `models.py` — dataclasses and enums shared across the package (see *Domain model* below).
-- `errors.py` — `SyncError` hierarchy (`ConfigError`, `ManifestError`, `AuthError`, `NlmError`,
-  `NlmTimeout`), each carrying its exit code.
+- `errors.py` — `SyncError` hierarchy (`ConfigError`, `ManifestError`, `DiscoveryError`,
+  `AuthError`, `NlmError`, `NlmTimeout`), each carrying its exit code.
 
 Elsewhere:
 
 - `tests/fake_notebooklm.py` — the fake `notebooklm` binary placed on `PATH`; replays canned JSON
   keyed by argv and logs every invocation.
-- `tests/conftest.py` — the `fake_cli`, `clean_env` and `db_path` fixtures.
+- `tests/conftest.py` — the `fake_cli`, `fake_http`, `clean_env` and `db_path` fixtures.
 - `tests/fixtures/source_list.json` — a scrubbed live capture of `source list --json`, pinning the
   real wire shape; `tests/fixtures/notebook_list.json` does the same for `list --json` (real shape,
-  placeholder ids and titles — the live ones are the user's private notebooks).
+  placeholder ids and titles — the live ones are the user's private notebooks);
+  `tests/fixtures/sitemap.xml` pins the sitemap wire shape from a real capture.
 - `tests/test_cli.py` — the Typer layer through `CliRunner`; the only place the exit-code contract
   is asserted end to end.
 - `.env.example` — committed template; `.env` itself is gitignored.
@@ -105,6 +116,22 @@ Only the non-obvious mechanics; the rest is readable in `models.py`.
 - **Wire shape ≠ Python model.** The upstream JSON uses `type` (not `kind`) and lowercase
   `status`. `source_from_payload()` reads `kind or type`; `tests/fixtures/source_list.json` pins
   this against a real capture, and unknown future fields are ignored rather than rejected.
+- **Crawl rules are declarations, not sources.** A manifest `url:` containing `/*` parses to a
+  `CrawlRule` and is *expanded* into plain entries by `discovery.expand_entries()` **before**
+  `plan()` — which is why `plan()` is still pure and `engine.py` needed no change for the feature.
+- **`level` is depth relative to the base, never absolute.** Under `https://site.com/*`, `/docs` is
+  level 1 and `/docs/intro` is level 2; under `https://site.com/docs/*`, `/docs/intro` is level 1.
+- **`except` matches on segment boundaries**, so `except=blog` removes `/blog` and `/blog/x` but
+  never `/blogging`. Its value may be relative to the base, rooted with `/`, or a full URL.
+- **The cap truncates and warns; it never fails.** Over `max`, the shallowest N are kept
+  (`sort(depth, url)`, so the same input yields the same N) and a warning names both counts —
+  the same "tell the user, don't block them" treatment duplicate manifest URLs get. An inline
+  `[max=N]` **always** overrides `SYNC_DISCOVERY_MAX`, in both directions.
+- **A hand-written entry always beats a rule that also matches it**, whatever the manifest order,
+  so its `title:` and `policy:` survive.
+- **Discovery is cached globally, keyed by base URL + `level` + `max` — not by `except`.** Excludes
+  are a pure post-filter, so tightening one re-uses the cached candidates instead of re-reading the
+  site, and the truncation warning stays accurate on a cache hit.
 
 ## Conventions
 
@@ -135,6 +162,10 @@ Not applicable — there is no UI beyond Rich tables in the terminal.
 
 - **No `subprocess` import anywhere in `src/` except `nlm.py`.** That single seam is what makes
   the suite testable offline; breaking it breaks the whole test strategy.
+- **No network access anywhere in `src/` except `discovery.py`** — no `urllib.request`,
+  `http.client` or `socket` elsewhere. Same argument, same payoff: `fetch` is injectable, so
+  `fake_http` can serve a whole website without a socket. (`urllib.parse` is pure string work and
+  is used freely.)
 - **No second, dry-run-only code path.** `--dry-run` runs the identical `plan()` and stops before
   side effects. A parallel path drifts and then lies about what a real run would do.
 - **Never delete a source.** Do not call `source delete`, `source delete-by-title` or

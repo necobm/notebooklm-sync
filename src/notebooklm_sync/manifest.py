@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from .crawl import parse_rule
 from .errors import ManifestError
 from .matching import dedupe_entries
 from .models import ManifestEntry, SyncPolicy
@@ -35,7 +36,7 @@ def parse_manifest(data: object, *, origin: str = "<manifest>") -> list[Manifest
 
         # A bare string is a reasonable shorthand for a URL-only entry.
         if isinstance(item, str):
-            entries.append(ManifestEntry(url=item))
+            entries.append(ManifestEntry(url=item, rule=parse_rule(item, where=where)))
             continue
         if not isinstance(item, dict):
             raise ManifestError(f"{where} must be a string or a mapping")
@@ -66,7 +67,14 @@ def parse_manifest(data: object, *, origin: str = "<manifest>") -> list[Manifest
         if title is not None and not isinstance(title, str):
             raise ManifestError(f"{where}: 'title' must be a string")
 
-        entries.append(ManifestEntry(url=url, title=title, type=type_, policy=policy))
+        rule = parse_rule(url, where=where)
+        if rule is not None and title is not None:
+            raise ManifestError(
+                f"{where}: a crawl rule cannot carry a 'title' — it expands to many "
+                "pages, and one title cannot name them all"
+            )
+
+        entries.append(ManifestEntry(url=url, title=title, type=type_, policy=policy, rule=rule))
 
     # normalize_url raises ManifestError for bad schemes, so this both de-duplicates
     # and validates every URL before the engine ever sees it.

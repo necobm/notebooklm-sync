@@ -34,6 +34,15 @@ class ManifestError(SyncError):
     exit_code = EXIT_CONFIG
 
 
+class DiscoveryError(SyncError):
+    """A crawl rule could not be resolved into any URLs.
+
+    Distinct from ``ManifestError``: the rule itself parsed fine, so this is a
+    failure to reach or read the site, not a config mistake the user can fix by
+    editing YAML alone.
+    """
+
+
 class AuthError(SyncError):
     """Upstream authentication is missing or expired.
 

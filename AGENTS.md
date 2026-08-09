@@ -97,7 +97,9 @@ uv run ruff check .                      # lint (line-length 100) — currently 
 uv run notebooklm-sync --help
 uv run notebooklm-sync sync research --dry-run        # plan only, no side effects
 uv run notebooklm-sync sync research -p override --only-stale   # refresh just what's stale
-uv run notebooklm-sync sync research -v               # echo every notebooklm argv to stderr
+uv run notebooklm-sync sync research -v               # echo every notebooklm argv + HTTP GET
+uv run notebooklm-sync expand research                # what do this manifest's /* rules match?
+uv run notebooklm-sync sync research --refresh-discovery   # re-read sites, ignore the URL cache
 ```
 
 CI (`.github/workflows/ci.yml`) runs `ruff check` and `pytest` on push and pull request against
@@ -117,16 +119,18 @@ One CLI that reconciles a **declared** YAML source manifest against what a Noteb
 The data flow through `src/notebooklm_sync/`, in order:
 
 ```
-config.py     .env  →  Settings{notebooks, policy, timeouts, db_path}
+config.py     .env  →  Settings{notebooks, policy, timeouts, db_path, discovery}
 manifest.py   YAML  →  list[ManifestEntry]          (validates + dedupes)
+crawl.py      "https://site.com/*[except=blog]"  →  CrawlRule            ← PURE
+discovery.py  CrawlRule  →  URLs, via sitemap or crawl  →  plain entries ← THE HTTP SEAM
 nlm.py        notebooklm source list --json  →  list[RemoteSource]
 engine.plan()  (entries, remote, policy) →  SyncPlan[PlannedAction]     ← PURE
 engine.execute()  PlannedAction  →  Outcome, via nlm.py                 ← side effects
 db.py         plan/outcomes  →  sync_runs + sync_events + sources mirror
-cli.py        Typer commands: sync · status · notebooks · history · init
+cli.py        Typer commands: sync · status · expand · notebooks · history · init
 ```
 
-### The three invariants
+### The four invariants
 
 These carry the whole design. Each has a reason that is not obvious from the code, and breaking
 any one of them breaks something far away from where you edited.
@@ -136,9 +140,16 @@ any one of them breaks something far away from where you edited.
 on `PATH` and keep the entire suite offline. Breaking the boundary breaks the test strategy, not
 just one test.
 
+**All HTTP goes through `discovery.py`.** No `urllib.request`, `http.client` or `socket` anywhere
+else in `src/` (`urllib.parse` is pure string work and is fine). Same argument as `nlm.py`: `fetch`
+is injectable, so `tests/conftest.py`'s `fake_http` serves an entire website without a socket. This
+is the newest seam and the easiest to erode — resist fetching "just this once" from elsewhere.
+
 **`engine.plan()` is pure; `engine.execute()` mutates.** `--dry-run` and `status` run the
 *identical* `plan()` and stop before side effects. Never add a second, dry-run-only code path —
-it will drift from the real one and then lie to you about what a real run would do.
+it will drift from the real one and then lie to you about what a real run would do. Crawl rules
+are resolved *before* `plan()`, in `cli._expand()`, which is precisely what keeps this true —
+`engine.py` needed no change at all for that feature.
 
 **Sync never deletes.** Sources in the notebook that are absent from the manifest ("orphans")
 are reported, never removed — a typo in a manifest must not be able to destroy a notebook. This
@@ -167,9 +178,18 @@ refreshed; anything else (pasted text, uploads) becomes a `SKIP` with a reason, 
 can't block the notebook. Refresh is deliberately in-place rather than delete-and-re-add — the
 source keeps its ID, so citations in saved notes and chats keep resolving.
 
-**Errors are typed and map to exit codes** (`errors.py`): `1` action failed · `2` config/manifest
-(`ConfigError`, `ManifestError`) · `3` auth (`AuthError`). `cli.py` catches `SyncError` at each
-command boundary and exits with `exc.exit_code` — new failure modes should get a `SyncError`
+**Crawl-rule `level` is *relative* depth, and the cap truncates rather than fails.** Under
+`https://site.com/*`, `/docs` is level 1 and `/docs/intro` is level 2; under
+`https://site.com/docs/*`, `/docs/intro` is level 1. `except=blog` matches on segment boundaries,
+so it removes `/blog` and `/blog/x` but never `/blogging`. Over `max`, the shallowest N are kept
+and a warning names both counts — an inline `[max=N]` **always** overrides `SYNC_DISCOVERY_MAX`,
+in both directions, including downwards. The discovery cache is keyed by base URL + `level` +
+`max` and deliberately **not** by `except`, so tightening an exclusion re-uses the cache.
+
+**Errors are typed and map to exit codes** (`errors.py`): `1` action failed, or a rule that
+resolved to nothing (`DiscoveryError`) · `2` config/manifest (`ConfigError`, `ManifestError`,
+including every malformed crawl rule) · `3` auth (`AuthError`). `cli.py` catches `SyncError` at
+each command boundary and exits with `exc.exit_code` — new failure modes should get a `SyncError`
 subclass, not an ad-hoc `typer.Exit`.
 
 ### Configuration shape
@@ -226,6 +246,11 @@ else's machine.
   so `nlm.py`'s subprocess resolves to `tests/fake_notebooklm.py`. It records every argv and
   replays canned JSON keyed by subcommand (`"source list"`, `"auth check"`). Scenario values are
   either a bare response object or `{"stdout": ..., "exit": N}` when the exit code matters.
+- `fake_http` — the network counterpart: a mapping of URL → canned response, passed to
+  `Discoverer(fetch=…)` (or patched over `discovery.urllib_fetch` for CLI-level tests, which keeps
+  the flags and the cache under test). An unregistered URL returns 404, so a forgotten stub fails
+  loudly instead of quietly reaching the real internet. Helpers: `add`, `add_sitemap`,
+  `add_sitemap_index`; `.requests` is the log.
 - `clean_env` — strips inherited `NOTEBOOK*` / `SYNC_*` so a test sees only what it sets.
 - `db_path` — a tmp database, never the repo's `./notebooklm-sync.db`.
 

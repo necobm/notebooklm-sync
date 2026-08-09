@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import db as store
 from . import engine
 from .config import Settings, load_settings
+from .discovery import Discoverer, Expansion, expand_entries
 from .errors import EXIT_ACTION_FAILED, EXIT_OK, ConfigError, ManifestError, SyncError
 from .manifest import load_manifest
 from .matching import normalize_url
-from .models import Action, NotebookConfig, Outcome, SyncPolicy
+from .models import Action, ManifestEntry, NotebookConfig, Outcome, SyncPolicy
 from .nlm import NlmClient
 
 app = typer.Typer(
@@ -46,6 +50,38 @@ def _client(settings: Settings, *, verbose: bool = False) -> NlmClient:
         profile=settings.profile,
         timeout=settings.cli_timeout,
         on_call=echo if verbose else None,
+    )
+
+
+def _discoverer(settings: Settings, *, verbose: bool = False) -> Discoverer:
+    def echo(url: str) -> None:
+        err_console.print(f"[dim]GET {url}[/dim]")
+
+    return Discoverer(timeout=settings.http_timeout, on_fetch=echo if verbose else None)
+
+
+def _expand(
+    entries: list[ManifestEntry],
+    settings: Settings,
+    conn: sqlite3.Connection,
+    *,
+    refresh: bool = False,
+    verbose: bool = False,
+) -> tuple[list[ManifestEntry], list[Expansion]]:
+    """Resolve crawl rules to plain entries, between the manifest and ``plan()``.
+
+    A manifest with no rules short-circuits, so nothing that worked before this
+    feature existed now touches the network.
+    """
+    if not any(entry.rule is not None for entry in entries):
+        return entries, []
+    return expand_entries(
+        entries,
+        discoverer=_discoverer(settings, verbose=verbose),
+        conn=conn,
+        ttl=settings.discovery_ttl,
+        refresh=refresh,
+        default_max=settings.discovery_max,
     )
 
 
@@ -81,6 +117,14 @@ SYNC_DB_PATH=./notebooklm-sync.db
 SYNC_WAIT_TIMEOUT=120
 SYNC_CLI_TIMEOUT=300
 SYNC_LOG_LEVEL=INFO
+
+# Crawl rules (`https://site.com/*[level=2][except=blog]`) in a manifest.
+# Seconds a rule's discovered URL list is reused before re-fetching the site.
+SYNC_DISCOVERY_TTL=86400
+# URLs one rule may contribute when it states no [max=N]. An inline [max=N]
+# always wins over this, in both directions.
+SYNC_DISCOVERY_MAX=100
+SYNC_HTTP_TIMEOUT=30
 """
 
 
@@ -95,7 +139,9 @@ def _safe_normalize(url: str | None) -> str | None:
 
 
 def _fail(exc: SyncError) -> None:
-    err_console.print(f"[red]error:[/red] {exc}")
+    # escape(): a message quoting a crawl rule carries square brackets, which Rich
+    # would otherwise read as markup and drop from the error the user has to act on.
+    err_console.print(f"[red]error:[/red] {escape(str(exc))}")
     raise typer.Exit(exc.exit_code)
 
 
@@ -108,6 +154,9 @@ def sync(
     only_stale: bool = typer.Option(
         False, "--only-stale", help="Under `override`, refresh only sources that are stale."
     ),
+    refresh_discovery: bool = typer.Option(
+        False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
     ),
@@ -119,6 +168,12 @@ def sync(
         default_policy = SyncPolicy(policy) if policy else settings.policy_for(config)
 
         entries = load_manifest(config.manifest_path)
+        conn = store.connect(settings.db_path)
+        # Crawl rules resolve here, before plan() — which keeps plan() pure and keeps
+        # --dry-run running the identical code path a real sync does.
+        entries, expansions = _expand(
+            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
+        )
         client = _client(settings, verbose=verbose)
 
         if not dry_run:
@@ -134,12 +189,11 @@ def sync(
             # refresh/skip set a real run would produce.
             engine.apply_stale_filter(plan_, client)
 
-        conn = store.connect(settings.db_path)
         notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
         run_id = store.start_run(conn, notebook_pk, default_policy.value, dry_run=dry_run)
 
         if dry_run:
-            _render_plan(plan_, dry_run=True)
+            _render_plan(plan_, dry_run=True, expansions=expansions)
             for action in plan_.actions:
                 store.record_event(conn, run_id, action)
             summary = store.summarize(plan_.actions)
@@ -173,7 +227,7 @@ def sync(
         store.finish_run(conn, run_id, summary, "failed" if failed else "ok")
         store.mark_notebook_synced(conn, notebook_pk)
 
-        _render_plan(plan_, dry_run=False)
+        _render_plan(plan_, dry_run=False, expansions=expansions)
         raise typer.Exit(EXIT_ACTION_FAILED if failed else EXIT_OK)
 
     except SyncError as exc:
@@ -183,6 +237,9 @@ def sync(
 @app.command()
 def status(
     notebook: str = typer.Argument(None, help="Configured notebook name."),
+    refresh_discovery: bool = typer.Option(
+        False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
     ),
@@ -192,12 +249,60 @@ def status(
         settings = _load()
         config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
         entries = load_manifest(config.manifest_path)
+        conn = store.connect(settings.db_path)
+        entries, expansions = _expand(
+            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
+        )
         client = _client(settings, verbose=verbose)
         remote = client.list_sources(config.notebook_id)
         plan_ = engine.plan(
             config, entries, remote, default_policy=settings.policy_for(config)
         )
-        _render_plan(plan_, dry_run=True)
+        _render_plan(plan_, dry_run=True, expansions=expansions)
+    except SyncError as exc:
+        _fail(exc)
+
+
+@app.command()
+def expand(
+    notebook: str = typer.Argument(None, help="Configured notebook name."),
+    refresh_discovery: bool = typer.Option(
+        False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every HTTP request to stderr."
+    ),
+) -> None:
+    """Show which URLs a manifest's crawl rules resolve to.
+
+    Reads the website and nothing else — no auth, no NotebookLM call, no changes.
+    Run it before trusting a rule: sync never deletes, so a source added by a rule
+    that matched too much cannot be taken back by this tool.
+    """
+    try:
+        settings = _load()
+        config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
+        entries = load_manifest(config.manifest_path)
+        conn = store.connect(settings.db_path)
+        entries, expansions = _expand(
+            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
+        )
+
+        if not expansions:
+            console.print(
+                f"[dim]{config.manifest_path} declares no crawl rules "
+                f"({len(entries)} plain source(s)).[/dim]"
+            )
+            return
+
+        for expansion in expansions:
+            table = Table(title=escape(expansion.rule.raw))
+            table.add_column("#", justify="right", style="dim")
+            table.add_column("URL")
+            for index, url in enumerate(expansion.urls, start=1):
+                table.add_row(str(index), url)
+            console.print(table)
+        _render_expansions(expansions)
     except SyncError as exc:
         _fail(exc)
 
@@ -327,8 +432,50 @@ def init() -> None:
     )
 
 
-def _render_plan(plan_, *, dry_run: bool) -> None:
+def _age(moment: datetime) -> str:
+    """A rough human age, for the discovery cache line."""
+    seconds = max(0, int((datetime.now(UTC) - moment).total_seconds()))
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{seconds // 60}m ago"
+    if seconds < 172_800:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86_400}d ago"
+
+
+def _render_expansions(expansions: list[Expansion]) -> None:
+    """One line per crawl rule, plus the warning a truncated rule owes the user.
+
+    The warning is printed on cached runs too: filtering re-runs on every
+    invocation, so ``matched`` is always the real count, never a stale one.
+    """
+    for expansion in expansions:
+        origin = expansion.source
+        if expansion.cached:
+            origin += f", cached {_age(expansion.fetched_at)}"
+        # Rule strings are full of square brackets, which Rich would read as markup
+        # and silently swallow — `…/*[except=blog]` would print as `…/*`.
+        raw = escape(expansion.rule.raw)
+        console.print(
+            f"[dim]rule[/dim] {raw} "
+            f"[dim]→[/dim] {len(expansion.urls)} URL(s) [dim]({origin})[/dim]"
+        )
+        if expansion.dropped:
+            cap = expansion.rule.max_urls
+            err_console.print(
+                f"[yellow]warning:[/yellow] {raw} matched "
+                f"{expansion.matched} URLs; keeping the first {cap}. "
+                "Raise [bold]max=[/bold] or narrow with [bold]level=[/bold] / "
+                "[bold]except=[/bold]."
+            )
+
+
+def _render_plan(plan_, *, dry_run: bool, expansions: list[Expansion] | None = None) -> None:
     """Print the plan (or its results) and a summary line."""
+    if expansions:
+        _render_expansions(expansions)
+
     table = Table(title="Sync plan" if dry_run else "Sync results")
     table.add_column("Action", style="bold")
     if not dry_run:

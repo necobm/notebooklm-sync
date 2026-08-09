@@ -20,3 +20,97 @@ sources:
   # so short links and links with timestamps still match an existing source.
   - url: https://youtu.be/dQw4w9WgXcQ?t=42
     type: youtube
+
+  # ==========================================================================
+  # Web scraping rules
+  # ==========================================================================
+  #
+  # An entry whose path ends in `/*` declares a *subtree of a website* instead
+  # of a single page. The rule is resolved to a concrete list of URLs before
+  # anything is synced, and each resolved URL becomes an ordinary source.
+  #
+  # Resolution reads robots.txt for `Sitemap:` lines, then /sitemap.xml
+  # (following a <sitemapindex> one level). Only a site that publishes no
+  # sitemap at all falls back to fetching HTML and following same-host links.
+  #
+  # Preview a rule before trusting it — sync never deletes, so a source added
+  # by a rule that matched too much cannot be removed by this tool:
+  #
+  #     notebooklm-sync expand research
+  #
+  # --------------------------------------------------------------------------
+  # The four forms
+  # --------------------------------------------------------------------------
+  #
+  #   https://site.com/page        →  only that page (no `/*`: nothing changes)
+  #   https://site.com/*           →  the base page + every descendant, any depth
+  #   https://site.com/docs/*      →  /docs + everything under it
+  #   https://site.com/*[level=2]  →  descendants at most 2 levels below the base
+  #   https://site.com/*[except=x] →  ...minus /x and its children (repeatable)
+  #   https://site.com/*[max=10]   →  at most 10 URLs from this rule
+  #
+  # Modifiers combine in any order:
+  #
+  #   https://site.com/*[level=2][except=blog][except=legal][max=300]
+
+  # The base page plus every page beneath it, at any depth.
+  - url: https://example.com/*
+
+  # Only the pages one level below /docs — /docs/intro yes, /docs/api/auth no.
+  # `level` counts segments BELOW THE BASE, not from the site root: under
+  # `/docs/*`, /docs/intro is level 1. Under `/*`, /docs is level 1 and
+  # /docs/intro is level 2.
+  - url: https://example.com/docs/*[level=1]
+
+  # Everything except a subtree. `except` is matched on segment boundaries, so
+  # `except=blog` removes /blog and /blog/anything but never /blogging.
+  # It may be repeated, and its value may be a path relative to the base
+  # (`blog`), a rooted path (`/blog`), or a full URL on the same host.
+  - url: https://example.com/*[except=blog][except=legal/terms]
+
+  # `type` and `policy` are inherited by every URL the rule expands to.
+  # `title` is NOT allowed on a rule — one title cannot name N pages, and
+  # NotebookLM derives a per-page title anyway.
+  - url: https://example.com/handbook/*
+    policy: override
+
+  # --------------------------------------------------------------------------
+  # The cap
+  # --------------------------------------------------------------------------
+  #
+  # A rule is capped at SYNC_DISCOVERY_MAX URLs (100 by default). Over the cap
+  # it keeps the first N and warns — it never fails, and never adds more than
+  # you asked for. Kept URLs are the shallowest first, then alphabetical, so
+  # `[max=10]` gives you the ten most top-level pages and the same ten on
+  # every run.
+  #
+  # An inline `[max=N]` ALWAYS overrides the configured default, in BOTH
+  # directions: `[max=300]` raises the cap, `[max=10]` lowers it.
+  - url: https://example.com/archive/*[max=10]
+
+  # --------------------------------------------------------------------------
+  # A worked example
+  # --------------------------------------------------------------------------
+  #
+  # https://www.mundana.us publishes a sitemap with 276 URLs, 239 of them
+  # under /blog. Measured against it:
+  #
+  #   https://www.mundana.us/*                  → 100 URLs + "matched 276" warning
+  #   https://www.mundana.us/*[max=300]         → 276 URLs
+  #   https://www.mundana.us/*[except=blog]     →  37 URLs
+  #   https://www.mundana.us/*[level=1]         →  38 URLs (/blog itself included)
+  #   https://www.mundana.us/*[except=blog][max=10] → 10 URLs + a warning
+  #
+  # --------------------------------------------------------------------------
+  # Things worth knowing
+  # --------------------------------------------------------------------------
+  #
+  # * Resolved URLs are cached in SQLite for SYNC_DISCOVERY_TTL seconds (24h by
+  #   default), so repeat runs and `status` cost no network. Force a re-fetch
+  #   with `--refresh-discovery`. Tightening an `except=` re-uses the cache.
+  # * A page the sitemap omits is never found. List it by hand alongside the
+  #   rule — a hand-written entry always wins over a rule that also matches it,
+  #   and keeps its own `title:` and `policy:`, whatever the order here.
+  # * A page that disappears becomes an orphan: reported, never deleted.
+  # * Only server-returned HTML is read. A site that needs JavaScript to reveal
+  #   its links must publish a sitemap or be listed page by page.

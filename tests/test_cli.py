@@ -297,3 +297,175 @@ def test_without_verbose_no_argv_is_printed(project):
     result = runner.invoke(app, ["sync", "research", "--dry-run"])
 
     assert "$ notebooklm" not in result.output
+
+
+# -- crawl rules ---------------------------------------------------------------
+
+
+BASE = "https://www.mundana.us"
+
+
+@pytest.fixture
+def site(project, monkeypatch, fake_http):
+    """Serve a small site to the CLI without opening a socket.
+
+    Patches `discovery.urllib_fetch` rather than `cli._discoverer`, so the flags,
+    the Discoverer construction and the cache all stay under test — only the socket
+    is replaced.
+    """
+    from notebooklm_sync import discovery
+
+    fake_http.add(f"{BASE}/robots.txt", "", status=404)
+    fake_http.add_sitemap(
+        f"{BASE}/sitemap.xml",
+        [f"{BASE}/store", f"{BASE}/nosotros", f"{BASE}/blog", f"{BASE}/blog/post-one"],
+    )
+    monkeypatch.setattr(discovery, "urllib_fetch", lambda url, **kwargs: fake_http(url))
+
+    project.http = fake_http
+    return project
+
+
+def use_rule(project, raw: str) -> None:
+    project.manifest.write_text(f"sources:\n  - url: {raw}\n", encoding="utf-8")
+
+
+def test_expand_lists_what_a_rule_resolves_to(site):
+    use_rule(site, f"{BASE}/*[except=blog]")
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 0
+    assert f"{BASE}/store" in result.output
+    assert "post-one" not in result.output
+    # It reads the website and nothing else: no auth check, no notebook call at all.
+    assert site.commands() == []
+
+
+def test_expand_on_a_manifest_without_rules_makes_no_request(site):
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 0
+    assert "no crawl rules" in result.output
+    assert site.http.requests == []
+
+
+def test_sync_dry_run_plans_the_expanded_urls_and_stays_read_only(site):
+    use_rule(site, f"{BASE}/*[except=blog]")
+    site.scenario({"source list": {"sources": []}})
+
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert site.commands() == ["source list"]  # still nothing mutating
+    assert f"{BASE}/store" in result.output
+    # 5 candidates (4 in the sitemap + the base page) minus /blog and /blog/post-one.
+    assert rows(site.db_path, "SELECT COUNT(*) c FROM sync_events")[0]["c"] == 3
+
+
+def test_a_cached_rule_makes_no_second_request(site):
+    use_rule(site, f"{BASE}/*")
+    site.scenario({"source list": {"sources": []}})
+
+    runner.invoke(app, ["sync", "research", "--dry-run"])
+    before = len(site.http.requests)
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert len(site.http.requests) == before
+    assert "cached" in result.output
+
+
+def test_refresh_discovery_bypasses_the_cache(site):
+    use_rule(site, f"{BASE}/*")
+    site.scenario({"source list": {"sources": []}})
+
+    runner.invoke(app, ["sync", "research", "--dry-run"])
+    before = len(site.http.requests)
+    result = runner.invoke(app, ["sync", "research", "--dry-run", "--refresh-discovery"])
+
+    assert result.exit_code == 0
+    assert len(site.http.requests) > before
+
+
+def test_a_truncated_rule_warns_with_both_numbers(site):
+    use_rule(site, f"{BASE}/*[max=2]")
+    site.scenario({"source list": {"sources": []}})
+
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "matched 5 URLs" in result.output
+    assert "keeping the first 2" in result.output
+
+
+def test_the_truncation_warning_survives_a_cache_hit(site):
+    use_rule(site, f"{BASE}/*[max=2]")
+    site.scenario({"source list": {"sources": []}})
+
+    runner.invoke(app, ["sync", "research", "--dry-run"])
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert "matched 5 URLs" in result.output
+
+
+def test_verbose_prints_every_http_request(site):
+    use_rule(site, f"{BASE}/*")
+    site.scenario({"source list": {"sources": []}})
+
+    result = runner.invoke(app, ["sync", "research", "--dry-run", "-v"])
+
+    assert f"GET {BASE}/sitemap.xml" in result.output
+
+
+def test_a_malformed_rule_exits_two(site):
+    use_rule(site, f"{BASE}/*[depth=2]")
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 2
+    assert "unknown modifier" in result.output
+
+
+def test_an_unreachable_site_exits_one(site, monkeypatch):
+    from notebooklm_sync import discovery
+
+    monkeypatch.setattr(
+        discovery,
+        "urllib_fetch",
+        lambda url, **kwargs: discovery.FetchResult(url=url, status=0),
+    )
+    use_rule(site, "https://nowhere.example/*")
+
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 1
+    assert "matched no pages" in result.output
+
+
+def test_a_hand_written_entry_keeps_its_title_over_the_rule(site):
+    site.manifest.write_text(
+        f"sources:\n  - url: {BASE}/*\n  - url: {BASE}/store\n    title: The Store\n",
+        encoding="utf-8",
+    )
+    site.scenario({"source list": {"sources": []}})
+
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "The Store" in result.output
+
+
+def test_a_rules_modifiers_survive_rich_markup(site):
+    """`[except=blog]` is valid Rich markup, so it must be escaped, not swallowed."""
+    use_rule(site, f"{BASE}/*[except=blog]")
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 0
+    assert f"{BASE}/*[except=blog]" in result.output
+
+
+def test_an_error_quoting_a_rule_keeps_its_brackets(site):
+    use_rule(site, f"{BASE}/*[depth=2]")
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 2
+    assert "[depth=2]" in result.output

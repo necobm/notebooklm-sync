@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: crawl.py imports matching.py
+    from .crawl import CrawlRule
 
 
 class SyncPolicy(str, Enum):
@@ -72,6 +76,12 @@ class ManifestEntry:
 
     #: Comparison key only — never sent to ``source add``, which always gets ``url``.
     normalized_url: str = ""
+
+    #: Set when ``url`` is a wildcard crawl rule rather than a page. Such an entry is
+    #: a *declaration*, not a source: ``discovery.expand_entries()`` replaces it with
+    #: one plain entry per matched URL before ``engine.plan()`` ever sees the list, so
+    #: ``url`` here is a rule string and ``normalized_url`` stays empty.
+    rule: CrawlRule | None = None
 
 
 @dataclass(frozen=True)

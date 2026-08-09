@@ -27,7 +27,8 @@ Then configure:
 
 ```bash
 cp .env.example .env      # edit: notebook names, IDs, manifest paths
-$EDITOR sources/research.yaml
+cp ./sources/example.yaml ./sources/your-sources.yaml
+$EDITOR ./sources/your-sources.yaml
 ```
 
 Cookies expire. If sync reports an auth failure, re-run `notebooklm login`. For unattended use,
@@ -36,13 +37,16 @@ schedule `notebooklm auth refresh` every 15–20 minutes.
 ## Usage
 
 ```bash
-notebooklm-sync sync research          # sync one notebook
-notebooklm-sync sync                   # pick a notebook interactively
-notebooklm-sync sync research --dry-run
-notebooklm-sync status research        # show drift, change nothing
-notebooklm-sync notebooks              # configured notebooks, health check + last sync
-notebooklm-sync history research       # past runs
+notebooklm-sync sync [notebook-name]          # sync one notebook
+notebooklm-sync sync                          # pick a notebook interactively
+notebooklm-sync sync [notebook-name] --dry-run
+notebooklm-sync status [notebook-name]        # show drift, change nothing
+notebooklm-sync expand [notebook-name]        # what do this manifest's crawl rules match?
+notebooklm-sync notebooks                     # configured notebooks, health check + last sync
+notebooklm-sync history [notebook-name]       # past runs
 ```
+
+`[notebook-name]` is one of the names you listed in `NOTEBOOKS` in your `.env`.
 
 Flags worth knowing:
 
@@ -51,11 +55,49 @@ Flags worth knowing:
 | `--dry-run` | Plan only. Runs the same reconciliation and stops before any change. |
 | `--only-stale` | Under `override`, refresh only the sources NotebookLM reports as stale. Works with `--dry-run`. |
 | `--no-wait` | Don't wait for ingestion; a source still processing is reported as `pending`. |
-| `-v` / `--verbose` | Print every `notebooklm` invocation to stderr, so you can reproduce it by hand. |
+| `--refresh-discovery` | Re-read the sites behind crawl rules instead of using the cached URL lists. |
+| `-v` / `--verbose` | Print every `notebooklm` invocation and every HTTP request to stderr, so you can reproduce it by hand. |
 
 `notebooks` checks each configured `NOTEBOOK_<NAME>_ID` against NotebookLM and marks it `ok` or
 `missing`. If it can't reach NotebookLM — expired cookies, no network — it says so and still shows
 your configuration.
+
+## Web crawl rules
+
+A manifest entry can declare a **subtree of a website** instead of one page. Any `url:` whose path
+ends in `/*` is a rule:
+
+```yaml
+sources:
+  # Every page on the site except the blog.
+  - url: https://www.mundana.us/*[except=blog]
+```
+
+| Form | Matches |
+|---|---|
+| `https://site.com/page` | only that page (no `/*` — nothing changes) |
+| `https://site.com/*` | the base page and every descendant, any depth |
+| `https://site.com/docs/*` | `/docs` and everything under it |
+| `https://site.com/*[level=2]` | descendants at most 2 levels **below the base** |
+| `https://site.com/*[except=blog]` | …minus `/blog` and its children — repeatable |
+| `https://site.com/*[max=10]` | at most 10 URLs from this rule |
+
+Modifiers combine in any order: `https://site.com/*[level=2][except=blog][max=300]`.
+
+Rules are resolved from `robots.txt` and `/sitemap.xml`; only a site that publishes no sitemap
+falls back to an HTML crawl. The resolved list is cached for `SYNC_DISCOVERY_TTL` seconds (24h by
+default), so repeat runs cost no network.
+
+A rule is capped at `SYNC_DISCOVERY_MAX` URLs (100 by default). Over the cap it keeps the
+shallowest N and warns — it never fails. An inline `[max=N]` **always** overrides that default, in
+both directions. `except` matches on segment boundaries, so `except=blog` never removes
+`/blogging`, and a page you also list by hand keeps its own `title:` and `policy:`.
+
+Run `notebooklm-sync expand [notebook-name]` before trusting a rule: it reads the website and nothing
+else — no auth, no NotebookLM call — and prints exactly what would be added. Sync never deletes,
+so a rule that matched too much cannot be undone by this tool.
+
+The full syntax is documented in [`sources/example.yaml`](sources/example.yaml).
 
 ## Sync policies
 
@@ -75,7 +117,8 @@ orphans and left untouched.
 
 ## Exit codes
 
-`0` ok · `1` one or more source actions failed · `2` config/manifest error · `3` auth failure
+`0` ok · `1` one or more source actions failed, or a crawl rule matched nothing ·
+`2` config/manifest error, including a malformed crawl rule · `3` auth failure
 
 ## Development
 

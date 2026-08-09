@@ -70,6 +70,64 @@ def fake_cli(tmp_path, monkeypatch) -> FakeCli:
     return FakeCli(bin_dir, scenario_path, calls_path)
 
 
+class FakeHttp:
+    """Canned HTTP responses for :class:`~notebooklm_sync.discovery.Discoverer`.
+
+    The network counterpart of :class:`FakeCli`: ``fetch`` is injected rather than
+    monkeypatched, so a test that forgets to configure a URL gets a 404 instead of
+    silently reaching the real internet.
+    """
+
+    def __init__(self) -> None:
+        self.pages: dict[str, tuple[int, bytes, str]] = {}
+        self.requests: list[str] = []
+
+    def add(
+        self,
+        url: str,
+        body: str | bytes = "",
+        *,
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+    ) -> None:
+        payload = body.encode("utf-8") if isinstance(body, str) else body
+        self.pages[url] = (status, payload, content_type)
+
+    def add_sitemap(self, url: str, urls: list[str], **kwargs) -> None:
+        locations = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
+        self.add(
+            url,
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"{locations}</urlset>",
+            content_type="application/xml",
+            **kwargs,
+        )
+
+    def add_sitemap_index(self, url: str, sitemaps: list[str]) -> None:
+        entries = "".join(f"<sitemap><loc>{u}</loc></sitemap>" for u in sitemaps)
+        self.add(
+            url,
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"{entries}</sitemapindex>",
+            content_type="application/xml",
+        )
+
+    def __call__(self, url: str):
+        from notebooklm_sync.discovery import FetchResult
+
+        self.requests.append(url)
+        status, body, content_type = self.pages.get(url, (404, b"", ""))
+        return FetchResult(url=url, status=status, body=body, content_type=content_type)
+
+
+@pytest.fixture
+def fake_http() -> FakeHttp:
+    """An injectable ``fetch`` that never opens a socket."""
+    return FakeHttp()
+
+
 @pytest.fixture
 def clean_env(monkeypatch):
     """Strip inherited config so tests see only what they set themselves."""
