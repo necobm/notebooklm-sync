@@ -41,6 +41,7 @@ class Settings:
     http_timeout: int = DEFAULT_HTTP_TIMEOUT
     discovery_ttl: int = DEFAULT_DISCOVERY_TTL
     discovery_max: int = DEFAULT_DISCOVERY_MAX
+    progress: bool = True
     log_level: str = "INFO"
 
     def notebook(self, name: str) -> NotebookConfig:
@@ -69,6 +70,17 @@ def _parse_policy(raw: str | None, *, where: str) -> SyncPolicy | None:
     except ValueError:
         valid = ", ".join(p.value for p in SyncPolicy)
         raise ConfigError(f"Invalid policy {raw!r} in {where}. Valid values: {valid}") from None
+
+
+#: Everything else non-empty reads as true, so a typo turns the display *on* rather
+#: than silently off — the failure the user can see is the better one.
+FALSEY = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool(raw: str | None, default: bool) -> bool:
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in FALSEY
 
 
 def _parse_int(raw: str | None, default: int, *, where: str) -> int:
@@ -135,5 +147,6 @@ def load_settings(env_file: str | Path | None = ".env", environ: dict | None = N
         discovery_max=_parse_int(
             env.get("SYNC_DISCOVERY_MAX"), DEFAULT_DISCOVERY_MAX, where="SYNC_DISCOVERY_MAX"
         ),
+        progress=_parse_bool(env.get("SYNC_PROGRESS"), True),
         log_level=(env.get("SYNC_LOG_LEVEL") or "INFO").strip().upper(),
     )

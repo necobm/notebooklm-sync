@@ -56,7 +56,28 @@ Flags worth knowing:
 | `--only-stale` | Under `override`, refresh only the sources NotebookLM reports as stale. Works with `--dry-run`. |
 | `--no-wait` | Don't wait for ingestion; a source still processing is reported as `pending`. |
 | `--refresh-discovery` | Re-read the sites behind crawl rules instead of using the cached URL lists. |
+| `--no-progress` | Don't show the live progress display. Implied by `-v`. |
 | `-v` / `--verbose` | Print every `notebooklm` invocation and every HTTP request to stderr, so you can reproduce it by hand. |
+
+### Progress
+
+`sync`, `status` and `expand` show a live display while they work — the three commands that can run
+for a while. Adding a source waits for NotebookLM to ingest it (up to `SYNC_WAIT_TIMEOUT`, 120s each
+by default), and a crawl rule on a site with no sitemap reads pages one at a time.
+
+```
+  ✓ discovery   1 rule → 37 URL(s)
+  ✓ auth        credentials ok
+  ✓ sources     41 in notebook
+  ⠹ syncing     ━━━━━━━━━━╸━━━━━━━━━  12/41  0:00:07
+                add   https://mundana.us/blog/post-12
+                ⠋ waiting for ingestion  0:00:04
+```
+
+It writes to **stderr** and wipes itself when the run ends, so `notebooklm-sync sync ... | cat`
+gives you exactly what it always did. It also turns itself off automatically when stderr is not a
+terminal — pipes, redirects, CI — and whenever `-v` is used, since both would be writing to the
+same place. To disable it permanently, set `SYNC_PROGRESS=0` in your `.env`.
 
 `notebooks` checks each configured `NOTEBOOK_<NAME>_ID` against NotebookLM and marks it `ok` or
 `missing`. If it can't reach NotebookLM — expired cookies, no network — it says so and still shows

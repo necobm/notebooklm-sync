@@ -469,3 +469,77 @@ def test_an_error_quoting_a_rule_keeps_its_brackets(site):
 
     assert result.exit_code == 2
     assert "[depth=2]" in result.output
+
+
+# -- progress display ---------------------------------------------------------
+#
+# `CliRunner` is never a TTY, which is precisely the condition `make_reporter()`
+# refuses to draw under. So what these assert is the *absence* of a display — the
+# regression that would break every downstream consumer of this tool's output.
+# The rendering itself is tested in `test_progress.py`.
+
+
+def assert_no_display(result) -> None:
+    """Nothing the live region emits may appear. `\\x1b[?25l` (hide cursor) and
+    `\\x1b[2K` (erase line) are emitted by `Live` and by nothing else here; the phase
+    strings are printed only by the reporter. The results table's own `━` is not a
+    usable signal, so it is deliberately not checked."""
+    assert "\x1b[?25l" not in result.output
+    assert "\x1b[2K" not in result.output
+    assert "credentials ok" not in result.output
+    assert "waiting for ingestion" not in result.output
+    assert "pages fetched" not in result.output
+
+
+def test_no_display_reaches_a_non_tty_sync(project):
+    project.scenario({"source list": {"sources": []}, "source add": {"id": "s9"}})
+    result = runner.invoke(app, ["sync", "research"])
+
+    assert result.exit_code == 0
+    assert_no_display(result)
+
+
+def test_no_display_reaches_a_non_tty_status(project):
+    project.scenario({"source list": {"sources": [REMOTE_SOURCE]}})
+    result = runner.invoke(app, ["status", "research"])
+
+    assert result.exit_code == 0
+    assert_no_display(result)
+
+
+def test_no_display_reaches_a_non_tty_expand(site):
+    use_rule(site, f"{BASE}/*[except=blog]")
+    result = runner.invoke(app, ["expand", "research"])
+
+    assert result.exit_code == 0
+    assert_no_display(result)
+
+
+@pytest.mark.parametrize("command", ["sync", "status", "expand"])
+def test_no_progress_is_accepted_everywhere_it_is_offered(project, command):
+    project.scenario({"source list": {"sources": [REMOTE_SOURCE]}})
+    args = [command, "research", "--no-progress"]
+    if command == "sync":
+        args.append("--dry-run")
+
+    assert runner.invoke(app, args).exit_code == 0
+
+
+def test_sync_progress_env_var_is_accepted(project, clean_env):
+    clean_env.setenv("SYNC_PROGRESS", "0")
+    project.scenario({"source list": {"sources": []}})
+    result = runner.invoke(app, ["sync", "research", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert rows(project.db_path, "SELECT dry_run FROM sync_runs")[0]["dry_run"] == 1
+
+
+def test_no_progress_does_not_change_the_exit_code_contract(project):
+    """Auth still fails with 3 — the flag touches presentation and nothing else."""
+    project.scenario(
+        {"auth check": {"stdout": {"error": True, "message": "Authentication expired"}, "exit": 1}}
+    )
+    result = runner.invoke(app, ["sync", "research", "--no-progress"])
+
+    assert result.exit_code == 3
+    assert "notebooklm login" in result.output

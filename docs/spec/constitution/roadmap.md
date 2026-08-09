@@ -23,6 +23,18 @@ Order and status of the features. Each entry points at its folder in `../feature
    matches before committing to sources sync can never remove. No new dependency; 212 tests pass.
    Verified live against `mundana.us`: `/*[except=blog]` → 37 of its 276 sitemap URLs.
 
+4. **004 · [Progress reporting for the slow commands](../features/004-progress-reporting/)** —
+   `sync`, `status` and `expand` show what they are doing while they do it: a phase list, a
+   determinate bar over the execute loop, and a spinner with a live fetch counter for discovery,
+   rendered on stderr and wiped when the run ends. The two silent paths it exists for are
+   `source wait` (up to 120s per added source) and the crawl fallback (0.2s × up to 100 fetches per
+   rule). Adds the project's third seam — `progress.py`, the only module allowed to render progress
+   — reached through optional `on_*` callbacks on `engine` and `discovery` that print nothing.
+   Follows the `tui-design` skill: 16-ANSI semantic slots, never colour alone, a bar only where the
+   total is real, and a 200ms grace so a cache hit never flashes. Off automatically when stderr is
+   not a TTY, which is why all 212 existing tests passed unmodified. No new dependency; 239 tests
+   pass. Not verified in tmux, and not against a live NotebookLM ingest.
+
 ## Next 🔜
 
 *Nothing scheduled. Pick the next item from the backlog and give it a `features/NNN-…/` folder.*

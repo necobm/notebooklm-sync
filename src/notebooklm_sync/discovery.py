@@ -361,12 +361,21 @@ def expand_entries(
     ttl: int = DEFAULT_DISCOVERY_TTL,
     refresh: bool = False,
     default_max: int = DEFAULT_DISCOVERY_MAX,
+    on_rule: Callable[[CrawlRule, int, int], None] | None = None,
 ) -> tuple[list[ManifestEntry], list[Expansion]]:
     """Replace every rule entry with the plain entries it declares.
 
     Runs between ``load_manifest()`` and ``engine.plan()``, so ``plan()`` keeps
     receiving a flat list of plain entries and stays a pure function.
+
+    ``on_rule(rule, index, total)`` is announced before each rule is resolved, with a
+    1-based index. Like ``Discoverer.on_fetch`` it prints nothing — a rule can take
+    tens of seconds to resolve through the crawl fallback, and naming which one is
+    running is the difference between "slow" and "hung".
     """
+    rules_total = sum(1 for entry in entries if entry.rule is not None)
+    rules_seen = 0
+
     explicit = {
         normalized
         for entry in entries
@@ -383,6 +392,9 @@ def expand_entries(
 
         # An inline [max=N] always wins; the configured default only fills a gap.
         rule = replace(entry.rule, max_urls=entry.rule.max_urls or default_max)
+        rules_seen += 1
+        if on_rule is not None:
+            on_rule(rule, rules_seen, rules_total)
         expansion = resolve_rule(
             rule,
             discoverer=discoverer,

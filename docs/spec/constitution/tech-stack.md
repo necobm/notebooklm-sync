@@ -11,6 +11,9 @@ The technical reference for this project. No feature plan should contradict it.
 - **CLI:** [Typer](https://typer.tiangolo.com/) for commands and flags, [Rich](https://rich.readthedocs.io/)
   for tables and coloured summaries.
 - **Config:** `python-dotenv` reading `.env`, with precedence `os.environ` > `.env` > defaults.
+  Keys: `NOTEBOOKS` + per-notebook `_ID`/`_SOURCES`/`_POLICY`, `SYNC_POLICY`, `SYNC_DB_PATH`,
+  `SYNC_WAIT_TIMEOUT`, `SYNC_CLI_TIMEOUT`, `SYNC_HTTP_TIMEOUT`, `SYNC_DISCOVERY_TTL`,
+  `SYNC_DISCOVERY_MAX`, `SYNC_PROGRESS`, `SYNC_LOG_LEVEL`.
 - **Manifests:** PyYAML.
 - **Database:** stdlib `sqlite3` — WAL journal mode, `foreign_keys=ON`, schema version stamped in
   `PRAGMA user_version` (currently `2`).
@@ -21,7 +24,7 @@ The technical reference for this project. No feature plan should contradict it.
 - **Upstream dependency:** the `notebooklm` CLI (upstream package `notebooklm-py`, v0.7.3),
   invoked as a **subprocess**. Not a library dependency — it is expected to be installed on the
   machine (a uv tool).
-- **Tests:** pytest, 212 tests, **fully offline** — no network, no Google auth.
+- **Tests:** pytest, 239 tests, **fully offline** — no network, no Google auth.
 - **Lint:** ruff, `line-length = 100`, default rule set.
 - **Type checking:** none configured yet, despite the code being fully annotated. See the roadmap.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) — `uv sync`, `ruff check`, `pytest` on push
@@ -35,6 +38,10 @@ Everything under `src/notebooklm_sync/`:
 - `cli.py` — Typer app and Rich rendering. Commands: `sync`, `status`, `expand`, `notebooks`,
   `history`, `init`. All errors funnel through one handler that maps a typed error to its exit code
   — except `notebooks`, which degrades (see *Domain model*).
+- `progress.py` — **the only module that renders progress.** `Reporter` (the interface, and as
+  written the no-op implementation), `NullReporter`, `LiveReporter` and `make_reporter()`. Imports
+  Rich and nothing from the two seams; the library modules announce events through callbacks and
+  print nothing.
 - `config.py` — `.env` + environment → a frozen `Settings`. Parses `NOTEBOOKS` plus
   `NOTEBOOK_<KEY>_ID` / `_SOURCES` / `_POLICY` (non-alphanumeric chars become `_`, uppercased).
 - `manifest.py` — YAML load and validation. `parse_manifest()` is IO-free (testable against
@@ -51,7 +58,8 @@ Everything under `src/notebooklm_sync/`:
   appends `--json`, injects the profile, and records each argv in `self.calls`.
 - `engine.py` — reconciliation. `plan()` is pure (manifest + remote sources → `SyncPlan`);
   `apply_stale_filter()` is a read-only probe step used by `--only-stale`; `execute()` performs the
-  actions and catches per-action failures.
+  actions and catches per-action failures. Both take optional `on_*` callbacks that announce work
+  and render nothing.
 - `db.py` — SQLite schema and persistence: `notebooks`, `sources`, the append-only
   `sync_runs` / `sync_events` audit tables, and the global `discovery_cache`.
 - `models.py` — dataclasses and enums shared across the package (see *Domain model* below).
@@ -68,7 +76,8 @@ Elsewhere:
   placeholder ids and titles — the live ones are the user's private notebooks);
   `tests/fixtures/sitemap.xml` pins the sitemap wire shape from a real capture.
 - `tests/test_cli.py` — the Typer layer through `CliRunner`; the only place the exit-code contract
-  is asserted end to end.
+  is asserted end to end. `CliRunner` is never a TTY, so it can only assert the *absence* of the
+  progress display — the rendering itself lives in `tests/test_progress.py`.
 - `.env.example` — committed template; `.env` itself is gitignored.
 - `sources/example.yaml` — example manifest, validated by the test suite.
 - `.claude/skills/` — `notebooklm-cli`, `sync-engine`, `test-fixtures`.
@@ -129,6 +138,15 @@ Only the non-obvious mechanics; the rest is readable in `models.py`.
   `[max=N]` **always** overrides `SYNC_DISCOVERY_MAX`, in both directions.
 - **A hand-written entry always beats a rule that also matches it**, whatever the manifest order,
   so its `title:` and `policy:` survive.
+- **The library notifies; only `cli.py` renders.** `NlmClient.on_call`, `Discoverer.on_fetch`,
+  `engine.execute(on_step=, on_action=)`, `engine.apply_stale_filter(on_probe=)` and
+  `discovery.expand_entries(on_rule=)` all announce an event and print nothing. `on_step` fires
+  *before* each unit of work on purpose: `source wait` can block for `SYNC_WAIT_TIMEOUT` seconds,
+  and reporting it afterwards would report it once it no longer mattered.
+- **The progress display is off unless it is certainly wanted.** `SYNC_PROGRESS` (default on), then
+  `--no-progress`, then `-v` (which wins, since a live region and a scrolling argv stream compete
+  for the same stderr), then `console.is_terminal`. `make_reporter()` is the single decision point
+  and returns a `NullReporter` otherwise — never an `if reporter:` branch at the call site.
 - **Discovery is cached globally, keyed by base URL + `level` + `max` — not by `except`.** Excludes
   are a pure post-filter, so tightening one re-uses the cached candidates instead of re-reading the
   site, and the truncation warning stays accurate on a cache hit.
@@ -156,7 +174,31 @@ Only the non-obvious mechanics; the rest is readable in `models.py`.
 
 ## Visual style
 
-Not applicable — there is no UI beyond Rich tables in the terminal.
+There is no UI beyond Rich tables and the live progress display in `progress.py`. This is **not**
+a fullscreen TUI — no alternate screen, no keybindings, no focus model — so most of the
+`tui-design` skill does not apply. What does, and is binding on any future terminal output:
+
+- **Semantic slots over 16-ANSI names, never hex.** `progress.STYLES` maps `success`/`error`/
+  `warning`/`info`/`muted`/`accent` onto `green`/`red`/`yellow`/`cyan`/`dim`/`blue`. Fixed hex
+  clashes with the user's theme, breaks on light backgrounds and needs truecolor to look as
+  intended; ANSI names delegate to the terminal and let `NO_COLOR` work for free.
+- **Never colour alone.** Every state carries a glyph *and* a word (`✓ auth  credentials ok` vs
+  `✗ auth  session expired`). The display must stay readable with every style stripped.
+- **Box-drawing and block characters only, no emoji**, with an ASCII glyph fallback
+  (`progress.ASCII_GLYPHS`) when the console encoding is not UTF-8.
+- **A determinate bar only where the total is real.** `execute()` knows `len(plan_.actions)` and
+  gets a bar; discovery does not know its total until the site answers and gets a spinner plus a
+  live fetch count. A percentage derived from a cap would be a confident lie.
+- **The braille `dots` spinner at 80ms**, refresh capped at 12.5fps over one differentially
+  redrawn region.
+- **Nothing is drawn for the first 200ms** (`progress.GRACE_SECONDS`), so a warm-cache run finishes
+  without a flash of chrome.
+- **Progress goes to stderr and is transient**, so stdout is byte-identical with or without it and
+  the results table is the only lasting output.
+- **Rich markup is a hazard, and there are two defences.** `cli.py` prints through markup and must
+  `rich.markup.escape()` anything user-supplied — a crawl rule's `[except=blog]` is valid markup and
+  gets silently swallowed otherwise. `progress.py` renders through `rich.text.Text`, which takes its
+  content literally, so it needs no escaping; keep it that way.
 
 ## Hard limits
 

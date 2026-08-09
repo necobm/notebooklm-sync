@@ -10,6 +10,8 @@ the manifest are reported as orphans and left alone.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .errors import NlmError
 from .matching import index_sources, normalize_entry
 from .models import (
@@ -134,7 +136,12 @@ def plan(
     return result
 
 
-def apply_stale_filter(plan_: SyncPlan, client: NlmClient) -> None:
+def apply_stale_filter(
+    plan_: SyncPlan,
+    client: NlmClient,
+    *,
+    on_probe: Callable[[PlannedAction], None] | None = None,
+) -> None:
     """Narrow ``REFRESH`` actions to the sources upstream reports as stale.
 
     Read-only: it probes ``source stale`` and rewrites decisions, so it is safe to
@@ -142,7 +149,8 @@ def apply_stale_filter(plan_: SyncPlan, client: NlmClient) -> None:
     preview equal to the real run instead of introducing a second code path.
 
     It lives here rather than inside ``plan()`` because ``plan()`` is pure and holds
-    no client.
+    no client. ``on_probe`` is announced *before* each probe; like ``NlmClient.on_call``
+    it renders nothing, so this module stays free of any display.
 
     **Fails open:** an unusable answer (no ``stale`` field) or a failed probe leaves
     the refresh in place. Refreshing needlessly wastes a call; skipping wrongly
@@ -153,6 +161,8 @@ def apply_stale_filter(plan_: SyncPlan, client: NlmClient) -> None:
     for action in plan_.actions:
         if action.action is not Action.REFRESH or not action.source_id:
             continue
+        if on_probe is not None:
+            on_probe(action)
         try:
             # The JSON field, never the exit code: `source stale --exit-on-stale`
             # inverts it (0 = stale).
@@ -171,14 +181,30 @@ def execute(
     *,
     wait: bool = True,
     wait_timeout: int = 120,
+    on_step: Callable[[PlannedAction, str], None] | None = None,
     on_action=None,
 ) -> list[PlannedAction]:
     """Perform the planned actions, annotating each with its outcome.
 
     A per-source failure never aborts the run: it is recorded and the next action
-    proceeds. ``on_action``, if given, is called after each action completes.
+    proceeds.
+
+    Two callbacks, both optional and both purely informational:
+
+    * ``on_step(action, step)`` fires **before** each unit of work, with ``step`` one
+      of ``"add"``, ``"wait"`` or ``"refresh"``. It has to fire first, because
+      ``"wait"`` can block for ``wait_timeout`` seconds and is the longest thing this
+      tool ever does — reporting it afterwards would report it once it no longer
+      mattered.
+    * ``on_action(action)`` fires after the whole action completes.
+
+    Neither renders anything; that is ``cli.py``'s job, via ``progress.py``.
     """
     notebook_id = plan_.notebook.notebook_id
+
+    def step(action: PlannedAction, name: str) -> None:
+        if on_step is not None:
+            on_step(action, name)
 
     for action in plan_.actions:
         try:
@@ -190,6 +216,7 @@ def execute(
                 action.outcome = Outcome.SKIPPED
 
             elif action.action is Action.ADD:
+                step(action, "add")
                 created = client.add_source(
                     notebook_id, action.url or "", title=action.title, type_=action.type
                 )
@@ -201,6 +228,7 @@ def execute(
                 action.outcome = Outcome.OK
 
                 if wait and action.source_id:
+                    step(action, "wait")
                     result = client.wait_source(
                         notebook_id, action.source_id, timeout=wait_timeout
                     )
@@ -215,6 +243,7 @@ def execute(
                         action.message = result.message
 
             elif action.action is Action.REFRESH:
+                step(action, "refresh")
                 client.refresh_source(notebook_id, action.source_id or "")
                 action.outcome = Outcome.OK
 

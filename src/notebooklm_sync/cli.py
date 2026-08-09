@@ -14,6 +14,7 @@ from rich.table import Table
 
 from . import db as store
 from . import engine
+from . import progress as progress_ui
 from .config import Settings, load_settings
 from .discovery import Discoverer, Expansion, expand_entries
 from .errors import EXIT_ACTION_FAILED, EXIT_OK, ConfigError, ManifestError, SyncError
@@ -53,11 +54,55 @@ def _client(settings: Settings, *, verbose: bool = False) -> NlmClient:
     )
 
 
-def _discoverer(settings: Settings, *, verbose: bool = False) -> Discoverer:
-    def echo(url: str) -> None:
-        err_console.print(f"[dim]GET {url}[/dim]")
+def _discoverer(settings: Settings, *, verbose: bool = False, on_fetch=None) -> Discoverer:
+    def notify(url: str) -> None:
+        if verbose:
+            err_console.print(f"[dim]GET {url}[/dim]")
+        if on_fetch is not None:
+            on_fetch(url)
 
-    return Discoverer(timeout=settings.http_timeout, on_fetch=echo if verbose else None)
+    return Discoverer(timeout=settings.http_timeout, on_fetch=notify)
+
+
+def _reporter(settings: Settings, *, no_progress: bool, verbose: bool) -> progress_ui.Reporter:
+    """Decide once whether this run gets a live display.
+
+    ``-v`` wins and turns it off: a scrolling argv/``GET`` stream and a live region
+    compete for the same stderr, and ``-v`` exists to be read closely. Everything
+    else is delegated to ``make_reporter``, which also refuses a non-TTY.
+    """
+    enabled = settings.progress and not no_progress and not verbose
+    return progress_ui.make_reporter(err_console, enabled=enabled)
+
+
+class _DiscoveryProgress:
+    """Bridges ``discovery``'s two callbacks onto the reporter.
+
+    Discovery has no honest total — a sitemap's length is unknown until it is parsed
+    and the crawl cap is a ceiling, not an estimate — so this reports a live fetch
+    count rather than a percentage.
+    """
+
+    def __init__(self, reporter: progress_ui.Reporter) -> None:
+        self.reporter = reporter
+        self.fetches = 0
+        self.label = ""
+
+    def on_rule(self, rule, index: int, total: int) -> None:
+        self.fetches = 0
+        self.label = f"rule {index}/{total}"
+        # No escape() needed: the reporter renders through rich Text, which takes its
+        # content literally — so a rule's [modifiers] cannot be eaten as markup here.
+        self.reporter.detail(rule.raw)
+        self._show()
+
+    def on_fetch(self, url: str) -> None:
+        self.fetches += 1
+        self._show()
+
+    def _show(self) -> None:
+        pages = "page" if self.fetches == 1 else "pages"
+        self.reporter.busy(f"{self.label} · {self.fetches} {pages} fetched")
 
 
 def _expand(
@@ -67,22 +112,54 @@ def _expand(
     *,
     refresh: bool = False,
     verbose: bool = False,
+    reporter: progress_ui.Reporter | None = None,
 ) -> tuple[list[ManifestEntry], list[Expansion]]:
     """Resolve crawl rules to plain entries, between the manifest and ``plan()``.
 
     A manifest with no rules short-circuits, so nothing that worked before this
-    feature existed now touches the network.
+    feature existed now touches the network — and no phase is reported either.
     """
     if not any(entry.rule is not None for entry in entries):
         return entries, []
-    return expand_entries(
+
+    reporter = reporter or progress_ui.NullReporter()
+    bridge = _DiscoveryProgress(reporter)
+    reporter.phase("discovery")
+    expanded, expansions = expand_entries(
         entries,
-        discoverer=_discoverer(settings, verbose=verbose),
+        discoverer=_discoverer(settings, verbose=verbose, on_fetch=bridge.on_fetch),
         conn=conn,
         ttl=settings.discovery_ttl,
         refresh=refresh,
         default_max=settings.discovery_max,
+        on_rule=bridge.on_rule,
     )
+    urls = sum(len(expansion.urls) for expansion in expansions)
+    rules = "rule" if len(expansions) == 1 else "rules"
+    reporter.finish(f"{len(expansions)} {rules} → {urls} URL(s)")
+    return expanded, expansions
+
+
+def _execute_callbacks(reporter: progress_ui.Reporter):
+    """Map ``engine.execute``'s two callbacks onto the display.
+
+    ``"wait"`` gets its own spinner line because it is the one step that can block
+    for ``SYNC_WAIT_TIMEOUT`` seconds — without it a slow ingest is indistinguishable
+    from a hang.
+    """
+
+    def on_step(action, step: str) -> None:
+        if step == "wait":
+            reporter.busy("waiting for ingestion")
+        else:
+            reporter.idle()
+            reporter.detail(f"{step}   {action.url or ''}")
+
+    def on_action(action) -> None:
+        reporter.idle()
+        reporter.advance()
+
+    return on_step, on_action
 
 
 def _pick_notebook(settings: Settings) -> NotebookConfig:
@@ -117,6 +194,11 @@ SYNC_DB_PATH=./notebooklm-sync.db
 SYNC_WAIT_TIMEOUT=120
 SYNC_CLI_TIMEOUT=300
 SYNC_LOG_LEVEL=INFO
+
+# Live progress display on stderr for `sync`, `status` and `expand`. It already
+# turns itself off when stderr is not a terminal and whenever -v is used; set this
+# to 0 to disable it permanently.
+SYNC_PROGRESS=1
 
 # Crawl rules (`https://site.com/*[level=2][except=blog]`) in a manifest.
 # Seconds a rule's discovered URL list is reused before re-fetching the site.
@@ -157,6 +239,9 @@ def sync(
     refresh_discovery: bool = typer.Option(
         False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
     ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Don't show the live progress display. Implied by -v."
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
     ),
@@ -169,47 +254,60 @@ def sync(
 
         entries = load_manifest(config.manifest_path)
         conn = store.connect(settings.db_path)
-        # Crawl rules resolve here, before plan() — which keeps plan() pure and keeps
-        # --dry-run running the identical code path a real sync does.
-        entries, expansions = _expand(
-            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
-        )
-        client = _client(settings, verbose=verbose)
+        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
 
-        if not dry_run:
-            # --test forces a real network round-trip; the local-only check reports
-            # "ok" even when the session has expired.
-            client.auth_check(test=True)
+        # Everything slow happens inside this block, and nothing is printed from it.
+        # Rich restores the terminal on the way out whatever raised, so Ctrl-C, a
+        # SyncError and a typer.Exit all leave a usable cursor behind.
+        with reporter:
+            # Crawl rules resolve here, before plan() — which keeps plan() pure and
+            # keeps --dry-run running the identical code path a real sync does.
+            entries, expansions = _expand(
+                entries, settings, conn, refresh=refresh_discovery,
+                verbose=verbose, reporter=reporter,
+            )
+            client = _client(settings, verbose=verbose)
 
-        remote = client.list_sources(config.notebook_id)
-        plan_ = engine.plan(config, entries, remote, default_policy=default_policy)
+            if not dry_run:
+                # --test forces a real network round-trip; the local-only check
+                # reports "ok" even when the session has expired.
+                reporter.phase("auth")
+                client.auth_check(test=True)
+                reporter.finish("credentials ok")
 
-        if only_stale:
-            # Read-only, so it runs in dry-run too: the preview must show the same
-            # refresh/skip set a real run would produce.
-            engine.apply_stale_filter(plan_, client)
+            reporter.phase("sources")
+            remote = client.list_sources(config.notebook_id)
+            reporter.finish(f"{len(remote)} in notebook")
 
-        notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
-        run_id = store.start_run(conn, notebook_pk, default_policy.value, dry_run=dry_run)
+            plan_ = engine.plan(config, entries, remote, default_policy=default_policy)
 
-        if dry_run:
-            _render_plan(plan_, dry_run=True, expansions=expansions)
-            for action in plan_.actions:
-                store.record_event(conn, run_id, action)
-            summary = store.summarize(plan_.actions)
-            store.finish_run(conn, run_id, summary, "dry-run")
-            raise typer.Exit(EXIT_OK)
+            if only_stale:
+                # Read-only, so it runs in dry-run too: the preview must show the
+                # same refresh/skip set a real run would produce.
+                _apply_stale_filter(plan_, client, reporter)
 
-        engine.execute(
-            plan_,
-            client,
-            wait=not no_wait,
-            wait_timeout=settings.wait_timeout,
-        )
+            notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
+            run_id = store.start_run(conn, notebook_pk, default_policy.value, dry_run=dry_run)
+
+            if not dry_run:
+                reporter.phase("syncing")
+                reporter.start_actions(len(plan_.actions))
+                on_step, on_action = _execute_callbacks(reporter)
+                engine.execute(
+                    plan_,
+                    client,
+                    wait=not no_wait,
+                    wait_timeout=settings.wait_timeout,
+                    on_step=on_step,
+                    on_action=on_action,
+                )
+                reporter.finish(f"{len(plan_.actions)} action(s)")
+
+        # -- the live region is gone; from here on it is only local work and output --
 
         for action in plan_.actions:
             store.record_event(conn, run_id, action)
-            if action.source_id and action.action is not Action.ORPHAN:
+            if not dry_run and action.source_id and action.action is not Action.ORPHAN:
                 store.upsert_source(
                     conn,
                     notebook_pk,
@@ -223,6 +321,12 @@ def sync(
                 )
 
         summary = store.summarize(plan_.actions)
+
+        if dry_run:
+            store.finish_run(conn, run_id, summary, "dry-run")
+            _render_plan(plan_, dry_run=True, expansions=expansions)
+            raise typer.Exit(EXIT_OK)
+
         failed = summary.failed > 0
         store.finish_run(conn, run_id, summary, "failed" if failed else "ok")
         store.mark_notebook_synced(conn, notebook_pk)
@@ -234,11 +338,35 @@ def sync(
         _fail(exc)
 
 
+def _apply_stale_filter(plan_, client: NlmClient, reporter: progress_ui.Reporter) -> None:
+    """``--only-stale``, with its probes reported: one subprocess call per refresh
+    candidate is easily the second-slowest thing a run does."""
+    total = len(plan_.of(Action.REFRESH))
+    if not total:
+        engine.apply_stale_filter(plan_, client)
+        return
+
+    probed = 0
+
+    def on_probe(action) -> None:
+        nonlocal probed
+        probed += 1
+        reporter.busy(f"checking {probed}/{total}")
+        reporter.detail(action.url or "")
+
+    reporter.phase("staleness")
+    engine.apply_stale_filter(plan_, client, on_probe=on_probe)
+    reporter.finish(f"{total} probed")
+
+
 @app.command()
 def status(
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     refresh_discovery: bool = typer.Option(
         False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
+    ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Don't show the live progress display. Implied by -v."
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
@@ -250,14 +378,21 @@ def status(
         config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
         entries = load_manifest(config.manifest_path)
         conn = store.connect(settings.db_path)
-        entries, expansions = _expand(
-            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
-        )
-        client = _client(settings, verbose=verbose)
-        remote = client.list_sources(config.notebook_id)
-        plan_ = engine.plan(
-            config, entries, remote, default_policy=settings.policy_for(config)
-        )
+        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
+
+        with reporter:
+            entries, expansions = _expand(
+                entries, settings, conn, refresh=refresh_discovery,
+                verbose=verbose, reporter=reporter,
+            )
+            client = _client(settings, verbose=verbose)
+            reporter.phase("sources")
+            remote = client.list_sources(config.notebook_id)
+            reporter.finish(f"{len(remote)} in notebook")
+            plan_ = engine.plan(
+                config, entries, remote, default_policy=settings.policy_for(config)
+            )
+
         _render_plan(plan_, dry_run=True, expansions=expansions)
     except SyncError as exc:
         _fail(exc)
@@ -268,6 +403,9 @@ def expand(
     notebook: str = typer.Argument(None, help="Configured notebook name."),
     refresh_discovery: bool = typer.Option(
         False, "--refresh-discovery", help="Re-resolve crawl rules instead of using the cache."
+    ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Don't show the live progress display. Implied by -v."
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print every HTTP request to stderr."
@@ -284,9 +422,13 @@ def expand(
         config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
         entries = load_manifest(config.manifest_path)
         conn = store.connect(settings.db_path)
-        entries, expansions = _expand(
-            entries, settings, conn, refresh=refresh_discovery, verbose=verbose
-        )
+        reporter = _reporter(settings, no_progress=no_progress, verbose=verbose)
+
+        with reporter:
+            entries, expansions = _expand(
+                entries, settings, conn, refresh=refresh_discovery,
+                verbose=verbose, reporter=reporter,
+            )
 
         if not expansions:
             console.print(

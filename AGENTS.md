@@ -100,6 +100,7 @@ uv run notebooklm-sync sync research -p override --only-stale   # refresh just w
 uv run notebooklm-sync sync research -v               # echo every notebooklm argv + HTTP GET
 uv run notebooklm-sync expand research                # what do this manifest's /* rules match?
 uv run notebooklm-sync sync research --refresh-discovery   # re-read sites, ignore the URL cache
+uv run notebooklm-sync sync research --no-progress         # no live display (implied by -v)
 ```
 
 CI (`.github/workflows/ci.yml`) runs `ruff check` and `pytest` on push and pull request against
@@ -127,10 +128,11 @@ nlm.py        notebooklm source list --json  →  list[RemoteSource]
 engine.plan()  (entries, remote, policy) →  SyncPlan[PlannedAction]     ← PURE
 engine.execute()  PlannedAction  →  Outcome, via nlm.py                 ← side effects
 db.py         plan/outcomes  →  sync_runs + sync_events + sources mirror
+progress.py   on_* callbacks  →  a live stderr display                  ← THE ONLY RENDERER
 cli.py        Typer commands: sync · status · expand · notebooks · history · init
 ```
 
-### The four invariants
+### The five invariants
 
 These carry the whole design. Each has a reason that is not obvious from the code, and breaking
 any one of them breaks something far away from where you edited.
@@ -150,6 +152,13 @@ is the newest seam and the easiest to erode — resist fetching "just this once"
 it will drift from the real one and then lie to you about what a real run would do. Crawl rules
 are resolved *before* `plan()`, in `cli._expand()`, which is precisely what keeps this true —
 `engine.py` needed no change at all for that feature.
+
+**The library notifies; only `cli.py` renders.** `nlm.py`, `discovery.py` and `engine.py` all take
+optional `on_*` callbacks that announce an event and print nothing — that is how `-v` and the
+progress display both work without either module importing Rich. `progress.py` is the only module
+that renders progress, and `grep -rn "rich" src/` must match nothing but it and `cli.py`. Note
+`engine.execute`'s `on_step` fires *before* each unit of work: `source wait` can block for
+`SYNC_WAIT_TIMEOUT` seconds, so announcing it afterwards would announce it too late to matter.
 
 **Sync never deletes.** Sources in the notebook that are absent from the manifest ("orphans")
 are reported, never removed — a typo in a manifest must not be able to destroy a notebook. This
@@ -280,3 +289,9 @@ Load these rather than re-deriving their content:
 - `.claude/skills/notebooklm-cli/` — upstream CLI surface, JSON shapes, exit codes, auth.
 - `.claude/skills/sync-engine/` — policies, URL matching, orphans, exit codes.
 - `.claude/skills/test-fixtures/` — how to test offline with the fake shim.
+- `.claude/skills/tui-design/` — framework-agnostic terminal-UI design system: layout paradigms,
+  keybinding layers, semantic colour slots, anti-patterns. Third-party, vendored from
+  [hyperb1iss/hyperskills](https://github.com/hyperb1iss/hyperskills) and pinned in
+  `skills-lock.json`; refresh with `npx skills update tui-design` (needs Node ≥ 20). Nothing here is
+  a *fullscreen* TUI, so its layout and keybinding halves do not apply — but its colour, glyph and
+  motion rules govern `progress.py` and are written down in `tech-stack.md` under *Visual style*.
