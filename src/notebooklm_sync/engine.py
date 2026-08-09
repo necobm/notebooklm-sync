@@ -75,6 +75,7 @@ def plan(
                     title=entry.title or match.title,
                     policy=policy,
                     source_id=match.id,
+                    kind=match.kind,
                     reason="already present",
                 )
             )
@@ -87,6 +88,7 @@ def plan(
                         title=entry.title or match.title,
                         policy=policy,
                         source_id=match.id,
+                        kind=match.kind,
                         reason="override policy",
                     )
                 )
@@ -100,6 +102,7 @@ def plan(
                         title=entry.title or match.title,
                         policy=policy,
                         source_id=match.id,
+                        kind=match.kind,
                         reason=f"kind {match.kind!r} cannot be refreshed",
                     )
                 )
@@ -123,11 +126,43 @@ def plan(
                     url=source.url,
                     title=source.title,
                     source_id=source.id,
+                    kind=source.kind,
                     reason="in notebook, not in manifest",
                 )
             )
 
     return result
+
+
+def apply_stale_filter(plan_: SyncPlan, client: NlmClient) -> None:
+    """Narrow ``REFRESH`` actions to the sources upstream reports as stale.
+
+    Read-only: it probes ``source stale`` and rewrites decisions, so it is safe to
+    run under ``--dry-run`` — which is the point. Running it in both modes keeps the
+    preview equal to the real run instead of introducing a second code path.
+
+    It lives here rather than inside ``plan()`` because ``plan()`` is pure and holds
+    no client.
+
+    **Fails open:** an unusable answer (no ``stale`` field) or a failed probe leaves
+    the refresh in place. Refreshing needlessly wastes a call; skipping wrongly
+    leaves the notebook serving stale content, which is the thing we exist to stop.
+    """
+    notebook_id = plan_.notebook.notebook_id
+
+    for action in plan_.actions:
+        if action.action is not Action.REFRESH or not action.source_id:
+            continue
+        try:
+            # The JSON field, never the exit code: `source stale --exit-on-stale`
+            # inverts it (0 = stale).
+            stale = client.is_stale(notebook_id, action.source_id)
+        except NlmError as exc:
+            action.message = f"staleness unknown ({exc}); refreshing anyway"
+            continue
+        if stale is False:
+            action.action = Action.SKIP
+            action.reason = "not stale"
 
 
 def execute(
@@ -160,6 +195,9 @@ def execute(
                 )
                 if created is not None:
                     action.source_id = created.id
+                    # Upstream's own classification wins; the manifest's `type:` is
+                    # only what we asked for.
+                    action.kind = created.kind or action.type
                 action.outcome = Outcome.OK
 
                 if wait and action.source_id:

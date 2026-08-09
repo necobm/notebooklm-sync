@@ -8,17 +8,16 @@ Order and status of the features. Each entry points at its folder in `../feature
    tool end to end: config, manifest, URL matching, plan/execute engine, the `notebooklm` adapter,
    SQLite audit log and five CLI commands. Verified offline and live.
 
+2. **002 · [Close the scaffolding gaps](../features/002-close-scaffolding-gaps/)** — the loose ends
+   left by 001: the source `kind` now reaches the local mirror, `notebooks` is a real health check
+   built on `nlm.list_notebooks()`, `sync --only-stale` narrows `override` via `nlm.is_stale()`,
+   `tests/test_cli.py` covers the exit-code contract through `CliRunner`, `-v/--verbose` echoes
+   every upstream argv, and CI runs `ruff` + `pytest` offline on 3.11 and 3.12. 117 tests pass.
+   *The workflow itself has not run yet — it needs a push to a remote.*
+
 ## Next 🔜
 
-2. **002 · [Close the scaffolding gaps](../features/002-close-scaffolding-gaps/)** — the known loose
-   ends left by 001, none of which change the architecture: record the source `kind` in the local
-   mirror, turn `notebooks` into a real health check with `nlm.list_notebooks()`, add `--only-stale`
-   for `override` with `nlm.is_stale()`, cover the CLI with `CliRunner`, add `-v/--verbose`, and add
-   an offline GitHub Actions job.
-
-   *Specced 📝 — see [`spec.md`](../features/002-close-scaffolding-gaps/spec.md),
-   [`plan.md`](../features/002-close-scaffolding-gaps/plan.md) and
-   [`tasks.md`](../features/002-close-scaffolding-gaps/tasks.md). Not implemented.*
+*Nothing scheduled. Pick the next item from the backlog and give it a `features/NNN-…/` folder.*
 
 ## Backlog / ideas 💡
 

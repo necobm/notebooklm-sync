@@ -58,6 +58,29 @@ These mirror the sharp edges in the `notebooklm-cli` skill — every one needs a
 **A source that can't be refreshed** — give it `"kind": "pasted_text"` in the `source list`
 response and assert the engine downgrades `override` to `SKIP` rather than calling refresh.
 
+**A fresh source under `--only-stale`** (the probe must be read as a JSON field, never an exit
+code):
+```python
+{"source list": {"sources": [...]}, "source stale": {"stale": False}}
+```
+
+**An unreachable notebook list** — `notebooks` must warn and still exit 0:
+```python
+{"list": {"stdout": {"error": True, "code": "UNEXPECTED_ERROR",
+                     "message": "Not authenticated"}, "exit": 0}}
+```
+
+## Testing the CLI itself
+
+`tests/test_cli.py` drives the Typer app with `typer.testing.CliRunner`. It is the only place the
+exit-code contract is asserted end to end, so keep it that way rather than asserting exit codes
+from library-level tests.
+
+Its `project` fixture is the pattern to copy: a manifest in `tmp_path`, `monkeypatch.chdir(tmp_path)`
+so no real `.env` can be read, and `NOTEBOOKS` / `NOTEBOOK_<NAME>_ID` / `_SOURCES` / `SYNC_DB_PATH`
+set through the `clean_env` fixture. Forget the `chdir` and the suite starts reading the developer's
+own configuration; forget `SYNC_DB_PATH` and it writes `./notebooklm-sync.db` into the repo.
+
 ## Rules
 
 - **Never** invoke the real `notebooklm` binary from a test. If `PATH` isn't stubbed, that's a
@@ -65,6 +88,9 @@ response and assert the engine downgrades `override` to `SKIP` rather than calli
 - Assert on the **argv the shim received** (`fake_cli.calls`) to prove we pass the right flags
   — e.g. that `auth check` is called with `--test`, and that `source add` receives the
   *original* URL rather than the normalized one.
+- `fake_cli.commands()` summarizes those calls as bare subcommands (`"source list"`), dropping
+  flags *and their values*, so `["source list"]` is an exact assertion that a dry run touched
+  nothing else. It shares `command_of()` with the shim, so both always agree.
 - Keep `plan()` tests pure: they need no shim at all, just a manifest and a source list.
 - Use a tmp-path SQLite DB per test; never touch `./notebooklm-sync.db`.
 

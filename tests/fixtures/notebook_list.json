@@ -1,0 +1,19 @@
+{
+  "notebooks": [
+    {
+      "index": 1,
+      "id": "11111111-2222-4333-8444-555555555555",
+      "title": "Research notebook",
+      "is_owner": true,
+      "created_at": "2026-08-09T11:46:33"
+    },
+    {
+      "index": 2,
+      "id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "title": "Shared reading list",
+      "is_owner": false,
+      "created_at": "2026-07-31T09:12:04"
+    }
+  ],
+  "count": 2
+}

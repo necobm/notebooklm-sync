@@ -193,7 +193,10 @@ def upsert_source(
             url = excluded.url,
             normalized_url = excluded.normalized_url,
             title = excluded.title,
-            kind = excluded.kind,
+            -- `kind` is an immutable property we sometimes fail to learn, so a run
+            -- that knows less must not null what an earlier one recorded. `title`
+            -- and `status` are current state and keep overwriting.
+            kind = COALESCE(excluded.kind, kind),
             status = excluded.status,
             last_seen_at = excluded.last_seen_at,
             last_action = excluded.last_action

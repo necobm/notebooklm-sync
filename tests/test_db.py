@@ -66,6 +66,26 @@ def test_upsert_source_updates_in_place(db_path):
     assert len(rows) == 1 and rows[0]["status"] == "READY"
 
 
+def test_upsert_source_keeps_a_known_kind(db_path):
+    # A later run that could not determine the kind must not null what we know.
+    conn = store.connect(db_path)
+    pk = store.upsert_notebook(conn, "research", "nb-1")
+    for kind in ("web_page", None):
+        store.upsert_source(
+            conn,
+            pk,
+            source_id="s1",
+            url="https://example.com/a",
+            normalized_url="https://example.com/a",
+            title="A",
+            kind=kind,
+            status="ready",
+            last_action="skip",
+        )
+    row = conn.execute("SELECT kind FROM sources WHERE source_id = 's1'").fetchone()
+    assert row["kind"] == "web_page"
+
+
 def test_history_is_append_only(db_path):
     conn = store.connect(db_path)
     pk = store.upsert_notebook(conn, "research", "nb-1")

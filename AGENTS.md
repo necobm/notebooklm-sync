@@ -96,9 +96,13 @@ uv run pytest -k wait_exit_two           # one test by name
 uv run ruff check .                      # lint (line-length 100) — currently clean
 uv run notebooklm-sync --help
 uv run notebooklm-sync sync research --dry-run        # plan only, no side effects
+uv run notebooklm-sync sync research -p override --only-stale   # refresh just what's stale
+uv run notebooklm-sync sync research -v               # echo every notebooklm argv to stderr
 ```
 
-There is no CI. The suite is fully offline, so anything failing locally is a real failure.
+CI (`.github/workflows/ci.yml`) runs `ruff check` and `pytest` on push and pull request against
+Python 3.11 and 3.12, with **no secrets** — the suite is fully offline, so anything failing locally
+is a real failure, and a test that needs a credential to pass in CI is a broken test.
 
 `ruff check` passes; the code is **not** `ruff format`-clean and isn't meant to be — don't run
 `ruff format` over the repo, it would reflow ~11 files into an unrelated diff.

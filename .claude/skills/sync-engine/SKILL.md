@@ -43,6 +43,19 @@ Decision table, per manifest entry:
 citations in saved notes and chat history keep resolving. Only URL/Drive-backed kinds can be
 refreshed — see the `notebooklm-cli` skill for the list.
 
+### `--only-stale`
+
+`engine.apply_stale_filter(plan_, client)` narrows `override` to the sources upstream reports as
+stale, rewriting the rest to `SKIP` with `reason="not stale"`.
+
+It sits **between** `plan()` and `execute()` rather than inside `plan()`, which must stay pure and
+client-free. The probe is read-only, so it runs under `--dry-run` too — that is deliberate: one
+code path serves both modes and the preview matches the real run.
+
+It **fails open.** `is_stale()` returning `None`, or raising `NlmError`, leaves the `REFRESH` in
+place. A wasted refresh costs one call; a wrongly skipped one leaves the notebook serving stale
+content, which is the thing this tool exists to prevent.
+
 ## The never-delete invariant
 
 **Sync never deletes anything.** Orphans are recorded and reported, never removed. A typo in a
@@ -92,6 +105,10 @@ summary and the exit code.
 | 1 | One or more source actions failed |
 | 2 | Config or manifest error (bad env, missing/invalid YAML) |
 | 3 | Auth failure — message must tell the user to run `notebooklm login` |
+
+One deliberate exception: **`notebooks` degrades instead of exiting.** Its upstream health check
+warns, renders `?`, and still exits 0 — it is the command you run *because* auth broke, so it must
+keep showing your configuration when everything else is failing.
 
 ## What lands in SQLite
 

@@ -1,6 +1,6 @@
 # 002 · Close the scaffolding gaps
 
-**Status:** specced 📝 — not implemented
+**Status:** implemented ✅ — 2026-08-09 · 117 tests pass offline · CI written but not yet run
 
 ## What it does
 
@@ -55,63 +55,64 @@ Each gap is a small, concrete cost being paid on every run:
 
 **Source kind in the mirror**
 
-- [ ] After a sync that skips or refreshes an existing source, that source's row in `sources` has a
+- [x] After a sync that skips or refreshes an existing source, that source's row in `sources` has a
       non-NULL `kind` matching what `source list` reported.
-- [ ] After a sync that adds a new source, its row records the kind returned by `source add` (or the
+- [x] After a sync that adds a new source, its row records the kind returned by `source add` (or the
       manifest's `type:` when upstream returns none).
-- [ ] A later run that cannot determine the kind leaves the previously recorded `kind` intact rather
+- [x] A later run that cannot determine the kind leaves the previously recorded `kind` intact rather
       than nulling it.
-- [ ] `PRAGMA user_version` is still `1` — no schema change.
+- [x] `PRAGMA user_version` is still `1` — no schema change.
 
 **`notebooks` health check**
 
-- [ ] `notebooks` calls `notebooklm list` and marks each configured notebook `ok` or `missing`
+- [x] `notebooks` calls `notebooklm list` and marks each configured notebook `ok` or `missing`
       against the IDs it returns.
-- [ ] A `NOTEBOOK_*_ID` absent from the upstream list is flagged `missing`, and the command still
+- [x] A `NOTEBOOK_*_ID` absent from the upstream list is flagged `missing`, and the command still
       exits 0.
-- [ ] When the upstream call fails (auth expired, binary absent, timeout), the command prints a
+- [x] When the upstream call fails (auth expired, binary absent, timeout), the command prints a
       warning, renders the table with the remote column as `?`, and exits **0** — a broken session
       must not stop the diagnostic command from reporting configuration.
 
 **`--only-stale`**
 
-- [ ] With `--policy override --only-stale`, a source upstream reports as *not* stale is skipped
+- [x] With `--policy override --only-stale`, a source upstream reports as *not* stale is skipped
       with a reason mentioning staleness, and `source refresh` is never called for it.
-- [ ] A source reported as stale is refreshed as usual.
-- [ ] The decision is read from the JSON `stale` field, never from `source stale`'s exit code.
-- [ ] If the staleness probe fails or returns nothing usable, the source is refreshed anyway
+- [x] A source reported as stale is refreshed as usual.
+- [x] The decision is read from the JSON `stale` field, never from `source stale`'s exit code.
+- [x] If the staleness probe fails or returns nothing usable, the source is refreshed anyway
       (fail open) and the run does not fail.
-- [ ] `--dry-run --only-stale` performs the same probing and previews the identical refresh/skip
+- [x] `--dry-run --only-stale` performs the same probing and previews the identical refresh/skip
       set a real run would produce, while still issuing no mutating call.
-- [ ] `--only-stale` under `skip` or `create` is an accepted no-op.
+- [x] `--only-stale` under `skip` or `create` is an accepted no-op.
 
 **CLI tests**
 
-- [ ] `tests/test_cli.py` exercises every command through `CliRunner`, offline, with no `.env` and
+- [x] `tests/test_cli.py` exercises every command through `CliRunner`, offline, with no `.env` and
       no auth.
-- [ ] Exit codes are asserted end to end: `0` success · `1` an action failed · `2` config or
+- [x] Exit codes are asserted end to end: `0` success · `1` an action failed · `2` config or
       manifest error · `3` auth failure, with the `notebooklm login` hint in the message.
-- [ ] `sync --dry-run` is asserted to issue **only** `source list` — no `auth check`, no `source
+- [x] `sync --dry-run` is asserted to issue **only** `source list` — no `auth check`, no `source
       add`, no `source refresh`.
-- [ ] A `source wait` timeout is asserted to report `pending` with the run still exiting 0.
-- [ ] `tests/fixtures/notebook_list.json` pins the real `notebooklm list --json` wire shape, the way
+- [x] A `source wait` timeout is asserted to report `pending` with the run still exiting 0.
+- [x] `tests/fixtures/notebook_list.json` pins the real `notebooklm list --json` wire shape, the way
       `test_live_shape.py` pins the source shape.
-- [ ] The whole suite still passes offline and `ruff check` is clean.
+- [x] The whole suite still passes offline and `ruff check` is clean.
 
 **`-v/--verbose`**
 
-- [ ] `-v` on `sync`, `status` and `notebooks` prints one line per upstream invocation, showing the
+- [x] `-v` on `sync`, `status` and `notebooks` prints one line per upstream invocation, showing the
       full argv including `--json` and the injected profile.
-- [ ] The lines go to **stderr**, so piping stdout is unaffected.
-- [ ] Without `-v` the output is byte-identical to today's.
-- [ ] No print/console call is added to `nlm.py` — rendering stays in `cli.py`.
+- [x] The lines go to **stderr**, so piping stdout is unaffected.
+- [x] Without `-v` the output is byte-identical to today's.
+- [x] No print/console call is added to `nlm.py` — rendering stays in `cli.py`.
 
 **CI**
 
 - [ ] A GitHub Actions workflow runs `uv sync`, `uv run ruff check .` and `uv run pytest` on push
-      and pull request, and passes.
-- [ ] It declares no secrets and no Google credentials, and does not set `NOTEBOOKLM_AUTH_JSON`.
-- [ ] It runs against both Python 3.11 (the declared floor) and 3.12.
+      and pull request, and passes. *Workflow written; it has not run yet — no push to a remote.
+      Its commands pass locally on both interpreters.*
+- [x] It declares no secrets and no Google credentials, and does not set `NOTEBOOKLM_AUTH_JSON`.
+- [x] It runs against both Python 3.11 (the declared floor) and 3.12.
 
 ## Out of scope
 

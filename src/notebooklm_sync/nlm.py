@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -69,12 +70,16 @@ class NlmClient:
         profile: str | None = None,
         timeout: int = 300,
         binary: str = BINARY,
+        on_call: Callable[[list[str]], None] | None = None,
     ) -> None:
         self.profile = profile
         self.timeout = timeout
         self.binary = binary
         #: argv of every invocation, in order — handy in tests and for -v output.
         self.calls: list[list[str]] = []
+        #: Notified with each argv as it is invoked. This adapter never prints;
+        #: rendering belongs to the caller (``cli.py``).
+        self.on_call = on_call
 
     # -- plumbing --------------------------------------------------------
 
@@ -90,6 +95,8 @@ class NlmClient:
     def _run(self, args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
         argv = self._argv(args)
         self.calls.append(argv)
+        if self.on_call is not None:
+            self.on_call(argv)
         env = dict(os.environ)
         if self.profile:
             env["NOTEBOOKLM_PROFILE"] = self.profile

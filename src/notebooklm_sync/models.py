@@ -113,6 +113,10 @@ class PlannedAction:
     source_id: str | None = None
     reason: str = ""
 
+    #: The source's kind, when known: copied from the matched ``RemoteSource``, or
+    #: learned from the ``source add`` response. Recorded in the local mirror.
+    kind: str | None = None
+
     outcome: Outcome | None = None
     message: str = ""
 

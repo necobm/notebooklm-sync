@@ -48,8 +48,12 @@ DEFAULTS: dict[str, object] = {
 }
 
 
-def _command_of(argv: list[str]) -> str:
-    """Return the scenario key for this invocation, ignoring flags and values."""
+def command_of(argv: list[str]) -> str:
+    """Return the scenario key for this invocation, ignoring flags and values.
+
+    Also used by the ``fake_cli`` fixture to summarize recorded calls, so a test
+    and the shim always agree on what a given argv "is".
+    """
     words: list[str] = []
     skip_next = False
     for arg in argv:
@@ -84,7 +88,7 @@ def main() -> int:
         with open(scenario_path, encoding="utf-8") as handle:
             scenario = json.load(handle)
 
-    command = _command_of(argv)
+    command = command_of(argv)
     response = scenario.get(command, DEFAULTS.get(command, {}))
 
     exit_code = 0

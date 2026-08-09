@@ -82,6 +82,22 @@ the JSON is not, and the rows are nested with notebook metadata:
 `source_from_payload` in `nlm.py` reads `kind or type` for this reason. A captured
 copy lives at `tests/fixtures/source_list.json`, guarded by `tests/test_live_shape.py`.
 
+## The notebook list shape
+
+**Verified live** (v0.7.3) — `notebooklm list --json` nests rows under `notebooks` alongside a
+`count`, and each row carries an `index` the upstream `Notebook` dataclass does not have:
+
+```json
+{"notebooks": [{"index": 1, "id": "11111111-2222-4333-8444-555555555555",
+                "title": "Research notebook", "is_owner": true,
+                "created_at": "2026-08-09T11:46:33"}], "count": 1}
+```
+
+The id key is plain **`id`**, not `notebook_id` — that is what `notebooks`' health check matches
+`NOTEBOOK_<NAME>_ID` against. `nlm.list_notebooks()` accepts both this envelope and a bare list.
+A shape-only copy (real keys, placeholder ids and titles, since live ones are the user's private
+notebooks) lives at `tests/fixtures/notebook_list.json`.
+
 `SourceType` values: `web_page`, `youtube`, `google_docs`, `google_slides`,
 `google_spreadsheet`, `google_drive_audio`, `google_drive_video`, `pdf`, `pasted_text`,
 `markdown`, `docx`, `csv`, `epub`, `image`, `media`, `unknown`.

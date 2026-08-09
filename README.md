@@ -40,9 +40,22 @@ notebooklm-sync sync research          # sync one notebook
 notebooklm-sync sync                   # pick a notebook interactively
 notebooklm-sync sync research --dry-run
 notebooklm-sync status research        # show drift, change nothing
-notebooklm-sync notebooks              # configured notebooks + last sync
+notebooklm-sync notebooks              # configured notebooks, health check + last sync
 notebooklm-sync history research       # past runs
 ```
+
+Flags worth knowing:
+
+| Flag | What it does |
+|---|---|
+| `--dry-run` | Plan only. Runs the same reconciliation and stops before any change. |
+| `--only-stale` | Under `override`, refresh only the sources NotebookLM reports as stale. Works with `--dry-run`. |
+| `--no-wait` | Don't wait for ingestion; a source still processing is reported as `pending`. |
+| `-v` / `--verbose` | Print every `notebooklm` invocation to stderr, so you can reproduce it by hand. |
+
+`notebooks` checks each configured `NOTEBOOK_<NAME>_ID` against NotebookLM and marks it `ok` or
+`missing`. If it can't reach NotebookLM — expired cookies, no network — it says so and still shows
+your configuration.
 
 ## Sync policies
 
@@ -68,7 +81,10 @@ orphans and left untouched.
 
 ```bash
 uv run pytest      # offline; needs no network and no Google auth
+uv run ruff check .
 ```
+
+CI runs both on every push and pull request, against Python 3.11 and 3.12. It needs no secrets.
 
 See `AGENTS.md` for the project contract, and `docs/spec/` for the specs — the project's
 constitution and one folder per feature.

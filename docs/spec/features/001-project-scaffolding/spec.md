@@ -65,4 +65,5 @@ This feature makes the desired source set **declarative** (a file in git), recon
   roadmap backlog.
 - **RSS / sitemap expansion**, **scheduled unattended runs** — roadmap backlog.
 - **CLI-level tests, CI, `--verbose`, `--only-stale`, recording the source kind in the local
-  mirror** — the known gaps, tracked as roadmap entry 002.
+  mirror** — the known gaps, closed by
+  [002 · Close the scaffolding gaps](../002-close-scaffolding-gaps/).

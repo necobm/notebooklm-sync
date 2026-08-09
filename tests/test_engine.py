@@ -191,9 +191,118 @@ def test_one_failure_does_not_abort_the_rest():
     assert client.added == ["https://example.com/good"]
 
 
+def test_plan_carries_the_matched_kind():
+    # The mirror can only record a kind if plan() copies the one it matched against.
+    plan = engine.plan(
+        NOTEBOOK,
+        [ManifestEntry(url="https://example.com/a")],
+        [existing(kind="youtube")],
+        default_policy=SyncPolicy.SKIP,
+    )
+    assert plan.actions[0].kind == "youtube"
+
+
+def test_execute_learns_the_kind_from_the_add_response():
+    class TypedClient(StubClient):
+        def add_source(self, notebook_id, url, *, title=None, type_=None):
+            self.added.append(url)
+            return RemoteSource(id="new-1", url=url, kind="web_page")
+
+    plan = engine.plan(NOTEBOOK, [ManifestEntry(url="https://example.com/new")], [])
+    engine.execute(plan, TypedClient())
+    assert plan.actions[0].kind == "web_page"
+
+
+def test_execute_falls_back_to_the_manifest_type():
+    plan = engine.plan(
+        NOTEBOOK, [ManifestEntry(url="https://youtu.be/abc", type="youtube")], []
+    )
+    engine.execute(plan, StubClient())  # its add_source returns no kind
+    assert plan.actions[0].kind == "youtube"
+
+
 def test_add_receives_original_url_not_normalized():
     raw = "https://www.example.com/a/?utm_source=news"
     plan = engine.plan(NOTEBOOK, [ManifestEntry(url=raw)], [])
     client = StubClient()
     engine.execute(plan, client)
     assert client.added == [raw]
+
+
+# -- apply_stale_filter -------------------------------------------------------
+
+
+class StaleClient(StubClient):
+    """Answers `is_stale` from a dict, or raises when told to."""
+
+    def __init__(self, answers: dict, error: Exception | None = None):
+        super().__init__()
+        self.answers = answers
+        self.error = error
+        self.probed: list[str] = []
+
+    def is_stale(self, notebook_id, source_id):
+        self.probed.append(source_id)
+        if self.error is not None:
+            raise self.error
+        return self.answers.get(source_id)
+
+
+def _override_plan(*sources):
+    return engine.plan(
+        NOTEBOOK,
+        [ManifestEntry(url=s.url) for s in sources],
+        list(sources),
+        default_policy=SyncPolicy.OVERRIDE,
+    )
+
+
+def test_stale_filter_skips_a_fresh_source():
+    plan = _override_plan(existing())
+    client = StaleClient({"s1": False})
+    engine.apply_stale_filter(plan, client)
+    assert plan.actions[0].action is Action.SKIP
+    assert plan.actions[0].reason == "not stale"
+
+    engine.execute(plan, client)
+    assert client.refreshed == []
+
+
+def test_stale_filter_keeps_a_stale_source():
+    plan = _override_plan(existing())
+    client = StaleClient({"s1": True})
+    engine.apply_stale_filter(plan, client)
+    assert plan.actions[0].action is Action.REFRESH
+
+    engine.execute(plan, client)
+    assert client.refreshed == ["s1"]
+
+
+def test_stale_filter_fails_open_on_unusable_answer():
+    # No `stale` field in the payload — refresh anyway rather than silently skip.
+    plan = _override_plan(existing())
+    engine.apply_stale_filter(plan, StaleClient({"s1": None}))
+    assert plan.actions[0].action is Action.REFRESH
+
+
+def test_stale_filter_fails_open_on_probe_error():
+    from notebooklm_sync.errors import NlmError
+
+    plan = _override_plan(existing())
+    engine.apply_stale_filter(plan, StaleClient({}, error=NlmError("BOOM", "probe died")))
+    assert plan.actions[0].action is Action.REFRESH
+    assert "refreshing anyway" in plan.actions[0].message
+
+
+def test_stale_filter_ignores_non_refresh_actions():
+    # Under `skip` there are no REFRESH actions, so nothing is probed at all.
+    plan = engine.plan(
+        NOTEBOOK,
+        [ManifestEntry(url="https://example.com/a"), ManifestEntry(url="https://example.com/new")],
+        [existing()],
+        default_policy=SyncPolicy.SKIP,
+    )
+    client = StaleClient({"s1": False})
+    engine.apply_stale_filter(plan, client)
+    assert client.probed == []
+    assert [a.action for a in plan.actions] == [Action.SKIP, Action.ADD]

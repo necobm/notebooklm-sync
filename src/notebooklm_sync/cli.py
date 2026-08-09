@@ -37,8 +37,16 @@ def _load() -> Settings:
     return settings
 
 
-def _client(settings: Settings) -> NlmClient:
-    return NlmClient(profile=settings.profile, timeout=settings.cli_timeout)
+def _client(settings: Settings, *, verbose: bool = False) -> NlmClient:
+    def echo(argv: list[str]) -> None:
+        # stderr, so piping stdout stays clean.
+        err_console.print(f"[dim]$ {' '.join(argv)}[/dim]")
+
+    return NlmClient(
+        profile=settings.profile,
+        timeout=settings.cli_timeout,
+        on_call=echo if verbose else None,
+    )
 
 
 def _pick_notebook(settings: Settings) -> NotebookConfig:
@@ -97,6 +105,12 @@ def sync(
     policy: str = typer.Option(None, "--policy", "-p", help="Override the sync policy."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Plan only; change nothing."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Don't wait for ingestion."),
+    only_stale: bool = typer.Option(
+        False, "--only-stale", help="Under `override`, refresh only sources that are stale."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
+    ),
 ) -> None:
     """Sync a notebook against its source manifest."""
     try:
@@ -105,7 +119,7 @@ def sync(
         default_policy = SyncPolicy(policy) if policy else settings.policy_for(config)
 
         entries = load_manifest(config.manifest_path)
-        client = _client(settings)
+        client = _client(settings, verbose=verbose)
 
         if not dry_run:
             # --test forces a real network round-trip; the local-only check reports
@@ -114,6 +128,11 @@ def sync(
 
         remote = client.list_sources(config.notebook_id)
         plan_ = engine.plan(config, entries, remote, default_policy=default_policy)
+
+        if only_stale:
+            # Read-only, so it runs in dry-run too: the preview must show the same
+            # refresh/skip set a real run would produce.
+            engine.apply_stale_filter(plan_, client)
 
         conn = store.connect(settings.db_path)
         notebook_pk = store.upsert_notebook(conn, config.name, config.notebook_id)
@@ -144,7 +163,7 @@ def sync(
                     url=action.url,
                     normalized_url=_safe_normalize(action.url),
                     title=action.title,
-                    kind=None,
+                    kind=action.kind,
                     status=action.outcome.value if action.outcome else None,
                     last_action=action.action.value,
                 )
@@ -162,13 +181,18 @@ def sync(
 
 
 @app.command()
-def status(notebook: str = typer.Argument(None, help="Configured notebook name.")) -> None:
+def status(
+    notebook: str = typer.Argument(None, help="Configured notebook name."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
+    ),
+) -> None:
     """Show drift between the manifest and the notebook. Changes nothing."""
     try:
         settings = _load()
         config = settings.notebook(notebook) if notebook else _pick_notebook(settings)
         entries = load_manifest(config.manifest_path)
-        client = _client(settings)
+        client = _client(settings, verbose=verbose)
         remote = client.list_sources(config.notebook_id)
         plan_ = engine.plan(
             config, entries, remote, default_policy=settings.policy_for(config)
@@ -178,24 +202,56 @@ def status(notebook: str = typer.Argument(None, help="Configured notebook name."
         _fail(exc)
 
 
+def _remote_notebook_ids(settings: Settings, *, verbose: bool) -> set[str] | None:
+    """IDs upstream currently knows about, or None if it could not be asked.
+
+    Deliberately degrades instead of exiting: this is the command you run *because*
+    something is wrong, and expired cookies are the likeliest reason. Refusing to
+    show the configuration at that exact moment would be the wrong failure mode.
+    """
+    try:
+        return {
+            str(row.get("id") or "")
+            for row in _client(settings, verbose=verbose).list_notebooks()
+            if isinstance(row, dict)
+        }
+    except SyncError as exc:
+        err_console.print(f"[yellow]warning:[/yellow] could not reach notebooklm: {exc}")
+        return None
+
+
 @app.command()
-def notebooks() -> None:
-    """List configured notebooks and when they were last synced."""
+def notebooks(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every `notebooklm` invocation to stderr."
+    ),
+) -> None:
+    """List configured notebooks, check them against NotebookLM, and show last sync."""
     try:
         settings = _load()
         conn = store.connect(settings.db_path)
+        remote_ids = _remote_notebook_ids(settings, verbose=verbose)
+
         table = Table(title="Configured notebooks")
         table.add_column("Name", style="bold")
         table.add_column("Notebook ID")
+        table.add_column("Remote")
         table.add_column("Manifest")
         table.add_column("Policy")
         table.add_column("Last synced")
         for name in sorted(settings.notebooks):
             config = settings.notebooks[name]
             exists = "" if Path(config.manifest_path).exists() else " [red](missing)[/red]"
+            if remote_ids is None:
+                remote = "[dim]?[/dim]"
+            elif config.notebook_id in remote_ids:
+                remote = "[green]ok[/green]"
+            else:
+                remote = "[red]missing[/red]"
             table.add_row(
                 name,
                 config.notebook_id,
+                remote,
                 f"{config.manifest_path}{exists}",
                 settings.policy_for(config).value,
                 store.last_synced_at(conn, name) or "never",

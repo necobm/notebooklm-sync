@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from fake_notebooklm import command_of
+
 FAKE_SCRIPT = Path(__file__).parent / "fake_notebooklm.py"
 
 
@@ -37,8 +39,12 @@ class FakeCli:
         ]
 
     def commands(self) -> list[str]:
-        """Just the subcommand words of each call, for coarse assertions."""
-        return [" ".join(a for a in call if not a.startswith("-")) for call in self.calls]
+        """Just the subcommand of each call ("source list"), for coarse assertions.
+
+        Flags *and their values* are dropped, so a notebook or source id passed via
+        ``-n`` never leaks into the summary.
+        """
+        return [command_of(call) for call in self.calls]
 
 
 @pytest.fixture

@@ -17,11 +17,11 @@ The technical reference for this project. No feature plan should contradict it.
 - **Upstream dependency:** the `notebooklm` CLI (upstream package `notebooklm-py`, v0.7.3),
   invoked as a **subprocess**. Not a library dependency — it is expected to be installed on the
   machine (a uv tool).
-- **Tests:** pytest, 85 tests, **fully offline** — no network, no Google auth.
+- **Tests:** pytest, 117 tests, **fully offline** — no network, no Google auth.
 - **Lint:** ruff, `line-length = 100`, default rule set.
 - **Type checking:** none configured yet, despite the code being fully annotated. See the roadmap.
-- **CI:** none yet. The suite needs no secrets, so a plain GitHub Actions job would work. See the
-  roadmap.
+- **CI:** GitHub Actions (`.github/workflows/ci.yml`) — `uv sync`, `ruff check`, `pytest` on push
+  and pull request, against Python 3.11 and 3.12. **No secrets**; a test that needs one is broken.
 - **Deployment:** none — a local tool, installed and run from the checkout.
 
 ## Key files / modules
@@ -29,7 +29,8 @@ The technical reference for this project. No feature plan should contradict it.
 Everything under `src/notebooklm_sync/`:
 
 - `cli.py` — Typer app and Rich rendering. Commands: `sync`, `status`, `notebooks`, `history`,
-  `init`. All errors funnel through one handler that maps a typed error to its exit code.
+  `init`. All errors funnel through one handler that maps a typed error to its exit code — except
+  `notebooks`, which degrades (see *Domain model*).
 - `config.py` — `.env` + environment → a frozen `Settings`. Parses `NOTEBOOKS` plus
   `NOTEBOOK_<KEY>_ID` / `_SOURCES` / `_POLICY` (non-alphanumeric chars become `_`, uppercased).
 - `manifest.py` — YAML load and validation. `parse_manifest()` is IO-free (testable against
@@ -39,7 +40,8 @@ Everything under `src/notebooklm_sync/`:
 - `nlm.py` — **the single subprocess boundary.** `NlmClient` wraps every `notebooklm` invocation,
   appends `--json`, injects the profile, and records each argv in `self.calls`.
 - `engine.py` — reconciliation. `plan()` is pure (manifest + remote sources → `SyncPlan`);
-  `execute()` performs the actions and catches per-action failures.
+  `apply_stale_filter()` is a read-only probe step used by `--only-stale`; `execute()` performs the
+  actions and catches per-action failures.
 - `db.py` — SQLite schema and persistence: `notebooks`, `sources`, and the append-only
   `sync_runs` / `sync_events` audit tables.
 - `models.py` — dataclasses and enums shared across the package (see *Domain model* below).
@@ -52,7 +54,10 @@ Elsewhere:
   keyed by argv and logs every invocation.
 - `tests/conftest.py` — the `fake_cli`, `clean_env` and `db_path` fixtures.
 - `tests/fixtures/source_list.json` — a scrubbed live capture of `source list --json`, pinning the
-  real wire shape.
+  real wire shape; `tests/fixtures/notebook_list.json` does the same for `list --json` (real shape,
+  placeholder ids and titles — the live ones are the user's private notebooks).
+- `tests/test_cli.py` — the Typer layer through `CliRunner`; the only place the exit-code contract
+  is asserted end to end.
 - `.env.example` — committed template; `.env` itself is gitignored.
 - `sources/example.yaml` — example manifest, validated by the test suite.
 - `.claude/skills/` — `notebooklm-cli`, `sync-engine`, `test-fixtures`.
@@ -80,6 +85,13 @@ Only the non-obvious mechanics; the rest is readable in `models.py`.
   `create` → `ADD` · in the notebook but not in the manifest → `ORPHAN`.
 - **`REFRESHABLE_KINDS`** — `source refresh` only works on URL- and Drive-backed kinds. Anything
   else (pasted text, uploaded files) makes `override` degrade to a skip rather than error.
+- **`--only-stale` narrows `override`, and fails open.** `engine.apply_stale_filter()` probes
+  `source stale` (a read-only call, so it runs under `--dry-run` too — one code path, both modes)
+  and rewrites REFRESH → SKIP for fresh sources. An unusable answer or a failed probe leaves the
+  refresh in place: a wasted refresh beats a notebook quietly serving stale content.
+- **`notebooks` degrades instead of exiting.** It checks every configured ID against
+  `notebooklm list`, but an unreachable upstream prints a warning, renders the remote column as `?`
+  and still exits 0 — it is the command you run *because* auth broke.
 - **`Outcome.PENDING` is not a failure.** `source wait` exits 2 on timeout, meaning ingestion is
   merely slow; the next run reconciles it and the run still exits 0.
 - **URL normalization is comparison-only.** `normalize_url()` strips whitespace, rejects non-http(s)

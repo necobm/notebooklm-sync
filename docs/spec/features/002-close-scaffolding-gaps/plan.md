@@ -1,6 +1,6 @@
 # 002 · Close the scaffolding gaps — Plan
 
-**Status:** specced, not started · **Last updated:** 2026-08-09
+**Status:** implemented ✅ · **Last updated:** 2026-08-09
 
 How the six gaps in [`spec.md`](spec.md) get closed. A living document: update it when the work
 lands.
@@ -196,9 +196,11 @@ a test ever needs a secret to pass in CI, the test is broken, not the workflow.
 
 ## Verification
 
-**Offline (required)**
+**Offline (required)** — all done 2026-08-09 unless noted.
 
-- `uv run pytest` — green, including the new `tests/test_cli.py`.
+- `uv run pytest` — **117 passed**, including the new `tests/test_cli.py` (20 cases). Also run under
+  Python 3.11 in a scratch venv: 117 passed, so the `requires-python = ">=3.11"` claim now has
+  evidence behind it.
 - `uv run ruff check .` — clean.
 - `grep -rn "^import subprocess\|^from subprocess" src/` — matches only `nlm.py`.
 - Against the fake shim: `--dry-run --only-stale` issues `source list` and `source stale` and
@@ -209,15 +211,18 @@ a test ever needs a secret to pass in CI, the test is broken, not the workflow.
 
 **Live (manual, only if the user has run `notebooklm login`)**
 
-- `notebooklm auth check --test` first; report honestly if it is expired rather than assuming.
-- `notebooklm-sync notebooks` against a real profile — a real ID reads `ok`, a made-up
-  `NOTEBOOK_*_ID` reads `missing`.
-- `notebooklm-sync sync <nb> --policy override --only-stale -v` against a throwaway notebook —
-  fresh sources skipped, `source refresh` issued only for stale ones, and the argv visible on
-  stderr.
-- Capture and scrub `notebooklm list --json` into `tests/fixtures/notebook_list.json`.
+- ✅ `notebooklm auth check --test` — `token_fetch: true`, session valid on 2026-08-09.
+- ✅ `notebooklm list --json` captured live, which **corrected the inferred shape**: the envelope
+  also carries `count`, and each row carries an `index` the upstream `Notebook` dataclass does not
+  have. `tests/fixtures/notebook_list.json` keeps that shape with placeholder ids and titles — the
+  real ones are the user's private notebooks, so this fixture is shape-only by design.
+- ⬜ `notebooklm-sync notebooks` against a real profile — not run; it would need a real
+  `NOTEBOOK_*_ID` configured in `.env`.
+- ⬜ `notebooklm-sync sync <nb> --policy override --only-stale -v` against a throwaway notebook —
+  not run; needs a disposable notebook, as in 001.
 
-**CI** — the workflow is green on a pull request, with no secrets configured.
+**CI** — ⬜ never executed: the workflow YAML parses and its three commands pass locally on 3.11 and
+3.12, but nothing has been pushed to a remote.
 
 ---
 

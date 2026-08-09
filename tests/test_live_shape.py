@@ -1,16 +1,20 @@
-"""Guard against the *real* upstream payload shape.
+"""Guard against the *real* upstream payload shapes.
 
-Captured from a live `notebooklm source list --json` run (v0.7.3) against a
-throwaway notebook. The real wire format differs from the idealized one in ways
-that are easy to get wrong:
+Captured from live `notebooklm source list --json` and `notebooklm list --json`
+runs (v0.7.3). The real wire format differs from the idealized one in ways that are
+easy to get wrong:
 
 * the source type field is ``type``, **not** ``kind``;
 * ``status`` is lowercase (``"ready"``), not ``"READY"``;
 * rows carry extra fields (``index``, ``status_id``) we ignore;
-* sources are nested under a ``sources`` key alongside notebook metadata.
+* sources are nested under a ``sources`` key alongside notebook metadata;
+* ``list --json`` nests notebooks under ``notebooks`` alongside a ``count``, and its
+  rows carry an ``index`` the upstream Python model does not have.
 
-The fixture is scrubbed of nothing sensitive — it references only example.com and
-a public RFC — but see the test-fixtures skill before capturing new ones.
+`source_list.json` is scrubbed of nothing sensitive — it references only example.com
+and a public RFC. `notebook_list.json` keeps the real shape but its ids and titles
+are placeholders, since the live ones are the user's private notebooks. See the
+test-fixtures skill before capturing new ones.
 """
 
 from __future__ import annotations
@@ -23,11 +27,17 @@ import pytest
 from notebooklm_sync.nlm import source_from_payload
 
 FIXTURE = Path(__file__).parent / "fixtures" / "source_list.json"
+NOTEBOOKS_FIXTURE = Path(__file__).parent / "fixtures" / "notebook_list.json"
 
 
 @pytest.fixture
 def live_payload() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def live_notebooks() -> dict:
+    return json.loads(NOTEBOOKS_FIXTURE.read_text(encoding="utf-8"))
 
 
 def test_type_field_populates_kind(live_payload):
@@ -58,3 +68,27 @@ def test_extra_unknown_fields_are_ignored(live_payload):
     # index/status_id exist on the wire; parsing must not choke on them.
     row = dict(live_payload["sources"][0], future_field="whatever")
     assert source_from_payload(row).id
+
+
+# -- notebooklm list --json ---------------------------------------------------
+
+
+def test_notebook_rows_are_nested_under_notebooks(live_notebooks, fake_cli):
+    from notebooklm_sync.nlm import NlmClient
+
+    fake_cli.scenario({"list": live_notebooks})
+    rows = NlmClient().list_notebooks()
+    assert len(rows) == 2
+
+
+def test_notebook_id_key_is_plain_id(live_notebooks):
+    # The health check matches NOTEBOOK_*_ID against this key.
+    assert live_notebooks["notebooks"][0]["id"] == "11111111-2222-4333-8444-555555555555"
+
+
+def test_bare_list_shape_is_also_accepted(live_notebooks, fake_cli):
+    # Defensive: upstream could drop the envelope. Unwrapping must not be required.
+    from notebooklm_sync.nlm import NlmClient
+
+    fake_cli.scenario({"list": live_notebooks["notebooks"]})
+    assert len(NlmClient().list_notebooks()) == 2
