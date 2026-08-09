@@ -10,19 +10,15 @@ Order and status of the features. Each entry points at its folder in `../feature
 
 ## Next 🔜
 
-2. **002 · Close the scaffolding gaps** — the known loose ends left by 001, none of which change
-   the architecture:
-   - `cli.py` passes `kind=None` to `upsert_source`, so the local `sources` mirror never records
-     the source type even though we have it.
-   - `nlm.list_notebooks()` is implemented but unused — wiring it into the `notebooks` command
-     would turn it into a real health check that flags a `NOTEBOOK_*_ID` that no longer exists.
-   - `nlm.is_stale()` is implemented but unused — an `--only-stale` mode for `override` would
-     refresh just the sources that need it instead of all of them.
-   - No CLI-level tests; Typer's `CliRunner` would cover exit codes and flag plumbing.
-   - No `-v/--verbose` to surface the argv captured in `NlmClient.calls`.
-   - No CI. The suite is fully offline, so a GitHub Actions job needs no secrets.
+2. **002 · [Close the scaffolding gaps](../features/002-close-scaffolding-gaps/)** — the known loose
+   ends left by 001, none of which change the architecture: record the source `kind` in the local
+   mirror, turn `notebooks` into a real health check with `nlm.list_notebooks()`, add `--only-stale`
+   for `override` with `nlm.is_stale()`, cover the CLI with `CliRunner`, add `-v/--verbose`, and add
+   an offline GitHub Actions job.
 
-   *Not specced yet — the folder gets created when the feature starts.*
+   *Specced 📝 — see [`spec.md`](../features/002-close-scaffolding-gaps/spec.md),
+   [`plan.md`](../features/002-close-scaffolding-gaps/plan.md) and
+   [`tasks.md`](../features/002-close-scaffolding-gaps/tasks.md). Not implemented.*
 
 ## Backlog / ideas 💡
 

@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Source manifests are personal — only the committed example is tracked
+sources/*
+!sources/example.yaml
+
 # Local sync database
 *.db
 *.db-wal
