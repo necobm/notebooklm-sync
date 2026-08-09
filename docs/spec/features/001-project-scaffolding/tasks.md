@@ -56,7 +56,11 @@ Derived from [`plan.md`](plan.md). Everything below shipped in commits `465c1f6`
 
 ## Outstanding
 
-- [ ] Delete the throwaway smoke-test notebook: `notebooklm delete 3fb8dfb7 -y`.
+- [x] Delete the throwaway smoke-test notebook (2026-08-09). Note the argv: `delete` takes the ID
+      via **`-n/--notebook`**, not positionally — `notebooklm delete <id> -y` fails with a
+      `VALIDATION_ERROR` envelope. The working call was
+      `notebooklm delete -n 3fb8dfb7-f168-4b35-a662-dcfdec05433d -y --json` → `success: true`,
+      confirmed absent from `notebooklm list`. Feature 001 is now fully closed.
 
 ## Maintenance (recurring checklist)
 

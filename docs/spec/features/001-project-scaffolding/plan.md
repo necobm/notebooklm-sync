@@ -199,8 +199,9 @@ auth failure → exit 3 with the login hint; `wait` exit 2 → `pending`, exit 0
 | Orphan (shrunk manifest) | Reported, still in the notebook ✓ |
 | `history` | All 5 runs recorded, dry-run flagged ✓ |
 
-**Cleanup still owed:** the throwaway notebook was left in place — delete with
-`notebooklm delete 3fb8dfb7 -y`. Tracked in [`tasks.md`](tasks.md).
+**Cleanup done (2026-08-09):** the throwaway notebook was deleted with
+`notebooklm delete -n 3fb8dfb7-f168-4b35-a662-dcfdec05433d -y --json` and confirmed absent from
+`notebooklm list`. See [`tasks.md`](tasks.md) for the argv quirk it exposed.
 
 ### Commits
 

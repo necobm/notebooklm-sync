@@ -7,8 +7,6 @@ You write the sources you *want* in a YAML manifest; `notebooklm-sync` reconcile
 what the notebook actually has, and records every run in SQLite so you can see what changed and
 when. It drives the [`notebooklm`](https://pypi.org/project/notebooklm-py/) CLI under the hood.
 
-> Unrelated to the upstream `notebooklm-py` package, despite this directory's name.
-
 ## Install
 
 ```bash
